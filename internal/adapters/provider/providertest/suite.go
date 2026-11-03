@@ -4,6 +4,7 @@ package providertest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -12,22 +13,17 @@ import (
 	"github.com/wikiabhi/rainwise/internal/ports"
 )
 
-const pageSize = 2
+// pageSizes are walked and compared. The largest fits a seeded set in one page,
+// so it has no page boundary at which to lose an item.
+var pageSizes = []int{1, 2, 3, 50}
 
 // Run executes the suite. newProvider returns a fresh provider seeded with at
-// least 3 bookmarks, the first listed of which has at least one tag.
+// least 3 and at most 50 bookmarks, in at least 2 collections, the first listed
+// of which has at least one tag.
 func Run(t *testing.T, newProvider func(t *testing.T) ports.Provider) {
 	t.Run("PaginationReturnsEverythingOnce", func(t *testing.T) {
-		all := listAll(t, newProvider(t))
-		if len(all) < 3 {
-			t.Fatalf("suite needs at least 3 seeded bookmarks, got %d", len(all))
-		}
-		seen := map[domain.ID]bool{}
-		for _, b := range all {
-			if seen[b.ID] {
-				t.Errorf("bookmark %s returned twice", b.ID)
-			}
-			seen[b.ID] = true
+		if err := CheckPagination(context.Background(), newProvider(t)); err != nil {
+			t.Error(err)
 		}
 	})
 
@@ -63,25 +59,8 @@ func Run(t *testing.T, newProvider func(t *testing.T) ports.Provider) {
 	})
 
 	t.Run("MoveKeepsTags", func(t *testing.T) {
-		ctx := context.Background()
-		p := newProvider(t)
-		all := listAll(t, p)
-		b := all[0]
-		target := b.Collection
-		for _, o := range all {
-			if o.Collection != b.Collection {
-				target = o.Collection
-			}
-		}
-		updated, err := p.UpdateBookmark(ctx, b.ID, ports.BookmarkPatch{Collection: &target})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if updated.Collection != target {
-			t.Errorf("collection = %v, want %v", updated.Collection, target)
-		}
-		if !slices.Equal(updated.Tags, b.Tags) {
-			t.Errorf("tags changed by a move: %v -> %v", b.Tags, updated.Tags)
+		if err := CheckMove(context.Background(), newProvider(t)); err != nil {
+			t.Error(err)
 		}
 	})
 
@@ -156,21 +135,84 @@ func first(t *testing.T, p ports.Provider) domain.Bookmark {
 	return page.Items[0]
 }
 
-func listAll(t *testing.T, p ports.Provider) []domain.Bookmark {
-	t.Helper()
+// CheckPagination walks the listing at several page sizes and requires each walk
+// to return the same bookmarks, each exactly once. Comparing them catches items
+// lost at page boundaries, which a single walk can't show.
+func CheckPagination(ctx context.Context, p ports.Provider) error {
+	var want []domain.ID
+	for i := len(pageSizes) - 1; i >= 0; i-- {
+		items, err := listAll(ctx, p, pageSizes[i])
+		if err != nil {
+			return fmt.Errorf("page size %d: %w", pageSizes[i], err)
+		}
+		ids := make([]domain.ID, len(items))
+		for j, b := range items {
+			ids[j] = b.ID
+		}
+		sorted := slices.SortedFunc(slices.Values(ids), func(a, b domain.ID) int { return strings.Compare(a.String(), b.String()) })
+		if dup := slices.Compact(slices.Clone(sorted)); len(dup) != len(sorted) {
+			return fmt.Errorf("page size %d returned a bookmark twice: %v", pageSizes[i], ids)
+		}
+		if want == nil {
+			if len(sorted) < 3 {
+				return fmt.Errorf("suite needs at least 3 seeded bookmarks, got %d", len(sorted))
+			}
+			want = sorted
+		} else if !slices.Equal(sorted, want) {
+			return fmt.Errorf("page size %d returned %v, want %v", pageSizes[i], sorted, want)
+		}
+	}
+	return nil
+}
+
+// CheckMove moves a tagged bookmark to a different collection and requires the
+// move to land and its tags to survive, in both the response and a re-read.
+func CheckMove(ctx context.Context, p ports.Provider) error {
+	all, err := listAll(ctx, p, pageSizes[len(pageSizes)-1])
+	if err != nil {
+		return err
+	}
+	if len(all) == 0 || len(all[0].Tags) == 0 {
+		return errors.New("suite needs the first bookmark to have a tag")
+	}
+	b := all[0]
+	idx := slices.IndexFunc(all, func(o domain.Bookmark) bool { return o.Collection != b.Collection })
+	if idx < 0 {
+		return errors.New("suite needs seeded bookmarks in at least 2 collections")
+	}
+	target := all[idx].Collection
+	updated, err := p.UpdateBookmark(ctx, b.ID, ports.BookmarkPatch{Collection: &target})
+	if err != nil {
+		return err
+	}
+	reread, err := p.GetBookmark(ctx, b.ID)
+	if err != nil {
+		return err
+	}
+	for name, got := range map[string]domain.Bookmark{"returned": updated, "re-read": reread} {
+		if got.Collection != target {
+			return fmt.Errorf("%s bookmark in %v, want %v", name, got.Collection, target)
+		}
+		if !slices.Equal(got.Tags, b.Tags) {
+			return fmt.Errorf("%s bookmark's tags changed by a move: %v -> %v", name, b.Tags, got.Tags)
+		}
+	}
+	return nil
+}
+
+func listAll(ctx context.Context, p ports.Provider, size int) ([]domain.Bookmark, error) {
 	var all []domain.Bookmark
 	token := ""
 	for range 1000 {
-		page, err := p.ListBookmarks(context.Background(), ports.ListQuery{PageToken: token, Limit: pageSize})
+		page, err := p.ListBookmarks(ctx, ports.ListQuery{PageToken: token, Limit: size})
 		if err != nil {
-			t.Fatal(err)
+			return nil, err
 		}
 		all = append(all, page.Items...)
 		if page.NextToken == "" {
-			return all
+			return all, nil
 		}
 		token = page.NextToken
 	}
-	t.Fatal("pagination never ended")
-	return nil
+	return nil, errors.New("pagination never ended")
 }

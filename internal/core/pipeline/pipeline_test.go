@@ -529,13 +529,18 @@ func TestDeletedBookmark(t *testing.T) {
 		if st.Status != string(Deleted) || st.PendingCollection != nil || st.PendingTags != nil {
 			t.Errorf("state = %+v", st)
 		}
+		d, ok, err := e.store.Jobs().GetDecision(context.Background(), "job", bm1)
+		if err != nil || !ok || d.Result != resultDeleted {
+			t.Errorf("decision = %+v, ok=%v, err=%v", d, ok, err)
+		}
 	})
 }
 
 // writeFails is a provider whose bookmark disappears at the moment of the write.
 type writeFails struct{ *pfake.Provider }
 
-func (w writeFails) UpdateBookmark(context.Context, domain.ID, ports.BookmarkPatch) (domain.Bookmark, error) {
+func (w writeFails) UpdateBookmark(_ context.Context, id domain.ID, _ ports.BookmarkPatch) (domain.Bookmark, error) {
+	w.Remove(id)
 	return domain.Bookmark{}, domain.ErrNotFound
 }
 
@@ -758,13 +763,9 @@ func TestFetchTemporaryFailure(t *testing.T) {
 
 func TestFetchCancelDoesNotCountAnAttempt(t *testing.T) {
 	e := newEnv(t)
-	e.rebuild(func(d *Deps) { d.ContentFetch = "auto"; d.Fetcher = e.fetch })
-	e.fetch.errs = []error{domain.ErrTemporary}
 	e.provider.Add(domain.Bookmark{ID: bm1, URL: "https://example.test/p", Collection: pfake.Inbox})
 	ctx, cancel := context.WithCancel(context.Background())
-	e.rebuild(func(d *Deps) {
-		d.Fetcher = cancelingFetcher{cancel}
-	})
+	e.rebuild(func(d *Deps) { d.ContentFetch = "auto"; d.Fetcher = cancelingFetcher{cancel} })
 	if _, err := e.pipe.Process(ctx, WorkItem{Bookmark: bm1}, options(TriggerSync)); err == nil {
 		t.Fatal("want an error")
 	}
@@ -1468,5 +1469,247 @@ func TestNoJobIDSavesNoDecision(t *testing.T) {
 	wantStatus(t, e.process(o), Changed)
 	if _, ok, _ := e.store.Jobs().GetDecision(context.Background(), "", bm1); ok {
 		t.Error("decision saved under an empty job")
+	}
+}
+
+func TestWriteNotFoundOnLiveBookmarkIsAnItemError(t *testing.T) {
+	e := newEnv(t)
+	e.provider.Add(inboxBookmark())
+	e.deps.Provider = writeErr{e.provider, domain.ErrNotFound} // a stale target collection
+	e.pipe = New(e.deps)
+	_, err := e.pipe.Process(context.Background(), WorkItem{Bookmark: bm1}, options(TriggerSync))
+	if err == nil {
+		t.Fatal("want an item error")
+	}
+	st := e.state()
+	if st.Status == string(Deleted) || st.PendingCollection != nil || st.PendingTags != nil || st.InputHash != "" {
+		t.Errorf("state = %+v", st)
+	}
+	d, ok, err := e.store.Jobs().GetDecision(context.Background(), "job", bm1)
+	if err != nil || !ok || d.Result != resultFailed || d.AppliedAt != nil {
+		t.Errorf("decision = %+v, ok=%v, err=%v", d, ok, err)
+	}
+	// The next run isn't confused by it: the provider now accepts the write.
+	e.deps.Provider = e.provider
+	e.pipe = New(e.deps)
+	wantStatus(t, e.process(options(TriggerSync)), Changed)
+	if got := e.state(); got.PinSource != domain.PinNone {
+		t.Errorf("pin = %q", got.PinSource)
+	}
+}
+
+func TestWriteNotFoundWithFailedReadIsAnItemError(t *testing.T) {
+	e := newEnv(t)
+	e.provider.Add(inboxBookmark())
+	boom := errors.New("read failed")
+	e.deps.Provider = writeThenReadFails{e.provider, boom}
+	e.pipe = New(e.deps)
+	_, err := e.pipe.Process(context.Background(), WorkItem{Bookmark: bm1}, options(TriggerSync))
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v", err)
+	}
+	if st := e.state(); st.Status == string(Deleted) || st.PendingCollection != nil {
+		t.Errorf("state = %+v", st)
+	}
+}
+
+// writeThenReadFails refuses the write as not found, then fails the next read.
+type writeThenReadFails struct {
+	*pfake.Provider
+	err error
+}
+
+func (w writeThenReadFails) UpdateBookmark(context.Context, domain.ID, ports.BookmarkPatch) (domain.Bookmark, error) {
+	w.FailNext(w.err)
+	return domain.Bookmark{}, domain.ErrNotFound
+}
+
+func TestBaselineThenBackfillIgnoresThePin(t *testing.T) {
+	e := newEnv(t)
+	b := inboxBookmark()
+	b.Collection = colB
+	e.provider.Add(b)
+	o := options(TriggerSync)
+	o.Baseline = true
+	wantStatus(t, e.process(o), Skipped)
+
+	wantStatus(t, e.process(options(TriggerSync)), Skipped) // §10.2: version-only difference
+	if e.cls.Calls() != 0 {
+		t.Fatalf("sync classified a baseline bookmark: %d calls", e.cls.Calls())
+	}
+	wantStatus(t, e.process(options(TriggerBackfill)), Changed)
+	if e.cls.Calls() != 1 || e.bookmark().Collection != colA {
+		t.Errorf("calls = %d, collection = %v", e.cls.Calls(), e.bookmark().Collection)
+	}
+	st := e.state()
+	if st.PinSource != domain.PinNone || st.TaxonomyVersion != 3 {
+		t.Errorf("state = %+v", st)
+	}
+}
+
+func TestFirstBackfillIgnoresPreCutoffPinDespiteSameHash(t *testing.T) {
+	// A sync pins the bookmark saved directly into colB and records its hash.
+	seed := func(t *testing.T) *env {
+		e := newEnv(t)
+		b := inboxBookmark()
+		b.Collection = colB
+		e.provider.Add(b)
+		wantStatus(t, e.process(options(TriggerSync)), Changed)
+		if st := e.state(); st.PinSource != domain.PinUser || st.InputHash == "" {
+			t.Fatalf("seed state = %+v", st)
+		}
+		e.now = e.now.Add(time.Hour)
+		return e
+	}
+	first := func(e *env) Options {
+		cutoff := e.now
+		o := options(TriggerBackfill)
+		o.IsFirstBackfill = true
+		o.PinCutoff = &cutoff
+		return o
+	}
+	t.Run("may move", func(t *testing.T) {
+		e := seed(t)
+		wantStatus(t, e.process(first(e)), Changed)
+		if e.cls.Calls() != 2 || e.bookmark().Collection != colA {
+			t.Errorf("calls = %d, collection = %v", e.cls.Calls(), e.bookmark().Collection)
+		}
+	})
+	t.Run("staying put settles the pin, so a resume doesn't classify again", func(t *testing.T) {
+		e := seed(t)
+		e.cls.Script(cfake.Result{Decision: decision("b", 0.9)})
+		o := first(e)
+		e.process(o)
+		if e.moves() != 0 {
+			t.Errorf("moves = %d", e.moves())
+		}
+		if st := e.state(); st.PinSource != domain.PinNone || st.PinnedAt != nil {
+			t.Errorf("state = %+v", st)
+		}
+		calls := e.cls.Calls()
+		wantStatus(t, e.process(o), Skipped)
+		if e.cls.Calls() != calls {
+			t.Errorf("resume classified again: %d calls", e.cls.Calls()-calls)
+		}
+	})
+	t.Run("dry run keeps the pin", func(t *testing.T) {
+		e := seed(t)
+		o := first(e)
+		o.DryRun = true
+		e.process(o)
+		if e.cls.Calls() != 2 {
+			t.Errorf("calls = %d", e.cls.Calls())
+		}
+		if st := e.state(); st.PinSource != domain.PinUser {
+			t.Errorf("state = %+v", st)
+		}
+	})
+	t.Run("pin after the cutoff binds", func(t *testing.T) {
+		e := seed(t)
+		o := first(e)
+		early := e.now.Add(-2 * time.Hour)
+		o.PinCutoff = &early
+		wantStatus(t, e.process(o), Skipped)
+		if e.cls.Calls() != 1 {
+			t.Errorf("calls = %d", e.cls.Calls())
+		}
+		if st := e.state(); st.PinSource != domain.PinUser {
+			t.Errorf("state = %+v", st)
+		}
+	})
+	t.Run("later backfill respects it", func(t *testing.T) {
+		e := seed(t)
+		wantStatus(t, e.process(options(TriggerBackfill)), Skipped)
+		if e.cls.Calls() != 1 {
+			t.Errorf("calls = %d", e.cls.Calls())
+		}
+	})
+}
+
+func TestHighlightKeepsNeedsReviewSecondChance(t *testing.T) {
+	hl := domain.ID{Provider: "fake", Local: "h1"}
+	e := newEnv(t)
+	b := inboxBookmark()
+	b.Collection = review
+	e.provider.Add(b)
+	e.putState(domain.BookmarkState{ID: bm1, KnownCollection: review, InputHash: InputHash(b, nil), TaxonomyVersion: 3})
+	e.provider.AddHighlight(domain.Highlight{ID: hl, Bookmark: bm1, Text: "highlighted words"})
+
+	out, err := e.pipe.Process(context.Background(), WorkItem{Bookmark: bm1, FocusHighlight: &hl}, options(TriggerWebhook))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantStatus(t, out, Changed)
+	if e.moves() != 0 {
+		t.Errorf("moves = %d", e.moves())
+	}
+
+	wantStatus(t, e.process(options(TriggerSync)), Changed)
+	if e.bookmark().Collection != colA {
+		t.Errorf("collection = %v", e.bookmark().Collection)
+	}
+	if e.state().InputHash == InputHash(b, nil) {
+		t.Error("hash not advanced by the collection decision")
+	}
+}
+
+func TestHighlightOnFiledBookmark(t *testing.T) {
+	hl := domain.ID{Provider: "fake", Local: "h1"}
+	e := newEnv(t)
+	b := inboxBookmark()
+	b.Collection = colB
+	e.provider.Add(b)
+	e.putState(domain.BookmarkState{ID: bm1, KnownCollection: colB, InputHash: InputHash(b, nil), TaxonomyVersion: 2})
+	e.provider.AddHighlight(domain.Highlight{ID: hl, Bookmark: bm1, Text: "highlighted words"})
+
+	if _, err := e.pipe.Process(context.Background(), WorkItem{Bookmark: bm1, FocusHighlight: &hl}, options(TriggerWebhook)); err != nil {
+		t.Fatal(err)
+	}
+	calls := e.cls.Calls()
+	st := e.state()
+	if st.InputHash == InputHash(b, nil) {
+		t.Error("filed bookmark's hash not recorded")
+	}
+	if st.TaxonomyVersion != 2 {
+		t.Errorf("version = %d: a tags-only run made no decision under the new taxonomy", st.TaxonomyVersion)
+	}
+	wantStatus(t, e.process(options(TriggerSync)), Skipped)
+	if e.cls.Calls() != calls {
+		t.Error("sync classified again")
+	}
+	e.process(options(TriggerBackfill))
+	if e.cls.Calls() != calls+1 {
+		t.Error("backfill did not act on the taxonomy change")
+	}
+}
+
+func TestDryRunMeetingALandedWrite(t *testing.T) {
+	e := newEnv(t)
+	b := inboxBookmark()
+	b.Collection = colA
+	e.provider.Add(b)
+	pending := colA
+	before := t0.Add(-time.Hour)
+	e.putState(domain.BookmarkState{ID: bm1, KnownCollection: pfake.Inbox, PendingCollection: &pending, RestoredAt: &before, Model: "m1"})
+	o := options(TriggerBackfill)
+	o.DryRun = true
+	out := e.process(o)
+	wantStatus(t, out, Unchanged)
+	if out.Record.Result != resultNoChange || out.Record.AppliedAt != nil || out.Record.TargetCollection != nil {
+		t.Errorf("record = %+v", out.Record)
+	}
+	d, ok, err := e.store.Jobs().GetDecision(context.Background(), "job", bm1)
+	if err != nil || !ok || d.Result != resultNoChange || d.AppliedAt != nil {
+		t.Errorf("decision = %+v, ok=%v, err=%v", d, ok, err)
+	}
+	st := e.state()
+	if st.PendingCollection != nil || st.KnownCollection != colA || st.PinSource != domain.PinNone {
+		t.Errorf("state = %+v", st)
+	}
+	if st.RestoredAt == nil {
+		t.Error("dry run cleared RestoredAt")
+	}
+	if e.cls.Calls() != 0 || len(e.provider.Writes()) != 0 {
+		t.Errorf("calls = %d, writes = %d", e.cls.Calls(), len(e.provider.Writes()))
 	}
 }

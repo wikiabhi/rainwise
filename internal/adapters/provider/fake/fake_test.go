@@ -17,7 +17,8 @@ func id(n int) domain.ID { return domain.ID{Provider: "fake", Local: fmt.Sprint(
 func seeded() *fake.Provider {
 	p := fake.New()
 	for i := range 5 {
-		p.Add(domain.Bookmark{ID: id(i), URL: fmt.Sprintf("https://example.test/%d", i), Tags: []string{"Keep", "other"}})
+		col := domain.ID{Provider: "fake", Local: fmt.Sprintf("col-%d", i%2)}
+		p.Add(domain.Bookmark{ID: id(i), URL: fmt.Sprintf("https://example.test/%d", i), Tags: []string{"Keep", "other"}, Collection: col})
 	}
 	return p
 }
@@ -94,5 +95,60 @@ func TestReturnedBookmarksDoNotAliasState(t *testing.T) {
 	again, _ := p.GetBookmark(context.Background(), id(1))
 	if again.Tags[0] != "Keep" {
 		t.Fatalf("state aliased: %v", again.Tags)
+	}
+}
+
+// dropsAtBoundary loses the first item of every page after the first, while the
+// pages it does return have no duplicates.
+type dropsAtBoundary struct{ *fake.Provider }
+
+func (d dropsAtBoundary) ListBookmarks(ctx context.Context, q ports.ListQuery) (domain.Page[domain.Bookmark], error) {
+	page, err := d.Provider.ListBookmarks(ctx, q)
+	if err == nil && q.PageToken != "" && len(page.Items) > 0 {
+		page.Items = page.Items[1:]
+	}
+	return page, err
+}
+
+func TestCheckPaginationCatchesItemsLostAtBoundaries(t *testing.T) {
+	if err := providertest.CheckPagination(context.Background(), seeded()); err != nil {
+		t.Fatalf("good provider: %v", err)
+	}
+	if err := providertest.CheckPagination(context.Background(), dropsAtBoundary{seeded()}); err == nil {
+		t.Fatal("a provider losing items at page boundaries passed")
+	}
+}
+
+type moveIgnored struct{ *fake.Provider }
+
+func (m moveIgnored) UpdateBookmark(ctx context.Context, i domain.ID, p ports.BookmarkPatch) (domain.Bookmark, error) {
+	p.Collection = nil
+	return m.Provider.UpdateBookmark(ctx, i, p)
+}
+
+type moveDropsTags struct{ *fake.Provider }
+
+func (m moveDropsTags) UpdateBookmark(ctx context.Context, i domain.ID, p ports.BookmarkPatch) (domain.Bookmark, error) {
+	p.SetTags = []string{}
+	return m.Provider.UpdateBookmark(ctx, i, p)
+}
+
+func TestCheckMoveCatchesBrokenMoves(t *testing.T) {
+	ctx := context.Background()
+	if err := providertest.CheckMove(ctx, seeded()); err != nil {
+		t.Fatalf("good provider: %v", err)
+	}
+	if err := providertest.CheckMove(ctx, moveIgnored{seeded()}); err == nil {
+		t.Error("a provider ignoring moves passed")
+	}
+	if err := providertest.CheckMove(ctx, moveDropsTags{seeded()}); err == nil {
+		t.Error("a provider dropping tags on a move passed")
+	}
+	same := fake.New()
+	for i := range 3 {
+		same.Add(domain.Bookmark{ID: id(i), Tags: []string{"t"}})
+	}
+	if err := providertest.CheckMove(ctx, same); err == nil {
+		t.Error("a seed with one collection made the check a no-op")
 	}
 }

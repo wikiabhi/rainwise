@@ -29,6 +29,8 @@ const (
 	resultApplied  = "applied"
 	resultNoChange = "no_change"
 	resultAborted  = "aborted"
+	resultFailed   = "failed"
+	resultDeleted  = "deleted"
 
 	reasonBaseline = "baseline"
 
@@ -330,8 +332,16 @@ func hasAllTags(have, want []string) bool {
 	return true
 }
 
-// finishRecovered records the result of a write that landed before a crash.
+// finishRecovered records the result of a write that landed before a crash. A
+// dry run finalizes state too, since the write is a fact, but it applied nothing
+// itself and reports nothing to do.
 func (p *Pipeline) finishRecovered(ctx context.Context, r *run, ourMove bool) (Outcome, error) {
+	const note = "write recovered after an interruption"
+	if r.opts.DryRun {
+		r.rec.Result = resultNoChange
+		r.rec.Reason = note
+		return p.complete(ctx, r, r.b, Unchanged, r.state.Model, ourMove, false)
+	}
 	if r.opts.JobID != "" {
 		saved, ok, err := p.d.Store.Jobs().GetDecision(ctx, r.opts.JobID, r.rec.Bookmark)
 		if err != nil {
@@ -341,7 +351,7 @@ func (p *Pipeline) finishRecovered(ctx context.Context, r *run, ourMove bool) (O
 			r.rec = saved
 		}
 	}
-	r.rec.Reason = joinReasons(r.rec.Reason, "write recovered after an interruption")
+	r.rec.Reason = joinReasons(r.rec.Reason, note)
 	return p.complete(ctx, r, r.b, Changed, r.state.Model, ourMove, true)
 }
 
@@ -356,7 +366,7 @@ func (p *Pipeline) skipReason(r *run) string {
 		return "restored; left alone until a backfill or reclassify"
 	case o.Baseline && !o.TagsOnly && r.isNew && !r.b.Collection.IsZero() && !p.inInbox(r.b):
 		return reasonBaseline
-	case !restored && !o.Force && r.state.InputHash == r.hash &&
+	case !restored && !o.Force && !ignoresUserPin(r.state, o) && r.state.InputHash == r.hash &&
 		(r.state.TaxonomyVersion == o.Taxonomy.Version || automatic):
 		return "input unchanged"
 	}
@@ -364,17 +374,23 @@ func (p *Pipeline) skipReason(r *run) string {
 }
 
 // recordBaseline marks a bookmark known without classifying it (§9.3). A user
-// pin already on it stays.
+// pin already on it stays. The taxonomy version stays unset because no decision
+// was made: by §10.2 sync then skips it, and a backfill still acts on it.
 func recordBaseline(r *run) {
 	st := &r.state
 	if st.PinSource == domain.PinNone {
 		pin(st, domain.PinBaseline, r.now)
 	}
 	st.InputHash = r.hash
-	st.TaxonomyVersion = r.opts.Taxonomy.Version
 	st.KnownTags = r.b.Tags
 	st.Status = string(Skipped)
 	st.ProcessedAt = &r.now
+}
+
+// ignoresUserPin reports a user pin this backfill must override (§9.1a), which
+// takes precedence over the hash skip in §10.2.
+func ignoresUserPin(st domain.BookmarkState, o Options) bool {
+	return o.Trigger == TriggerBackfill && !o.TagsOnly && st.PinSource == domain.PinUser && !pinBinds(st, o)
 }
 
 func (p *Pipeline) inInbox(b domain.Bookmark) bool {
@@ -776,7 +792,7 @@ func (p *Pipeline) apply(ctx context.Context, r *run, v Validated) (Outcome, err
 	}
 	updated, err := p.d.Provider.UpdateBookmark(ctx, r.b.ID, ports.BookmarkPatch{Collection: target, AddTags: tags})
 	if errors.Is(err, domain.ErrNotFound) {
-		return p.markDeleted(ctx, r.b.ID, r.now)
+		return p.handleWriteNotFound(ctx, r, err)
 	}
 	if err != nil {
 		return Outcome{}, fmt.Errorf("write bookmark %s: %w", r.b.ID, err)
@@ -784,6 +800,33 @@ func (p *Pipeline) apply(ctx context.Context, r *run, v Validated) (Outcome, err
 
 	// Step 10: record the result.
 	return p.complete(ctx, r, updated, status, model, target != nil, true)
+}
+
+// handleWriteNotFound settles a write the provider refused as not found, which
+// may mean a stale target collection and not a deleted bookmark. Only a read can
+// tell. Either way the write didn't land, so nothing stays pending.
+func (p *Pipeline) handleWriteNotFound(ctx context.Context, r *run, writeErr error) (Outcome, error) {
+	_, readErr := p.d.Provider.GetBookmark(ctx, r.b.ID)
+	if errors.Is(readErr, domain.ErrNotFound) {
+		r.rec.Result = resultDeleted
+		if err := p.saveDecision(ctx, r.rec); err != nil {
+			return Outcome{}, err
+		}
+		return p.markDeleted(ctx, r.b.ID, r.now)
+	}
+	r.state.PendingCollection, r.state.PendingTags = nil, nil
+	r.rec.Result = resultFailed
+	r.rec.Reason = joinReasons(r.rec.Reason, "provider reported not found on write")
+	if err := p.saveDecision(ctx, r.rec); err != nil {
+		return Outcome{}, err
+	}
+	if err := p.putState(ctx, r.state); err != nil {
+		return Outcome{}, err
+	}
+	if readErr != nil {
+		return Outcome{}, fmt.Errorf("write bookmark %s: %w; re-read: %w", r.b.ID, writeErr, readErr)
+	}
+	return Outcome{}, fmt.Errorf("write bookmark %s: %w", r.b.ID, writeErr)
 }
 
 func (r *run) setPlanned(target *domain.ID, tags []string) {
@@ -834,28 +877,45 @@ func (p *Pipeline) complete(ctx context.Context, r *run, b domain.Bookmark, stat
 	st.KnownCollection = b.Collection
 	st.KnownTags = b.Tags
 	st.PendingCollection, st.PendingTags = nil, nil
-	// A tags-only run says nothing about filing, so a new bookmark stays new.
-	if !(r.opts.TagsOnly && r.isNew) {
+	if !p.keepsCollectionDecisionOpen(r, b) {
 		st.InputHash = r.hash
 	}
-	st.TaxonomyVersion = r.opts.Taxonomy.Version
+	// A tags-only run made no collection decision under this taxonomy, so a
+	// later backfill must still see the version as different.
+	if !r.opts.TagsOnly {
+		st.TaxonomyVersion = r.opts.Taxonomy.Version
+	}
 	if model != "" {
 		st.Model = model
 	}
 	st.Status = string(status)
 	st.FetchAttempts = 0
 	st.ProcessedAt = &r.now
-	if movedByUs {
+	// A first backfill's pass settles an overridden pin, so resuming it doesn't
+	// classify the bookmark again.
+	if movedByUs || (!r.opts.DryRun && ignoresUserPin(*st, r.opts)) {
 		st.PinSource = domain.PinNone
 		st.PinnedAt = nil
 	}
-	if r.opts.Trigger == TriggerBackfill || r.opts.Trigger == TriggerReclassify {
+	if !r.opts.DryRun && (r.opts.Trigger == TriggerBackfill || r.opts.Trigger == TriggerReclassify) {
 		st.RestoredAt = nil
 	}
 	if err := p.putState(ctx, *st); err != nil {
 		return Outcome{}, err
 	}
 	return Outcome{Status: status, Record: r.rec}, nil
+}
+
+// keepsCollectionDecisionOpen reports a tags-only run on a bookmark still owed a
+// collection decision: a new one, or one in Needs Review. Recording the hash
+// would make the next sync skip it, so the hash waits for that decision.
+func (p *Pipeline) keepsCollectionDecisionOpen(r *run, b domain.Bookmark) bool {
+	if !r.opts.TagsOnly {
+		return false
+	}
+	full := r.opts
+	full.TagsOnly = false
+	return r.isNew || EvaluateMove(r.state, r.known, b, p.d.Provider.Capabilities().InboxCollection, full)
 }
 
 func (p *Pipeline) markDeleted(ctx context.Context, id domain.ID, now time.Time) (Outcome, error) {
