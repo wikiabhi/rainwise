@@ -55,7 +55,7 @@ Expect `{"items":[{"_id":"tag","count":N}, ...]}`. Rainwise's adapter calls `GET
 - Works, counts look right: set `providers.raindrop.tag_listing: true`. The tag vocabulary then comes from this endpoint.
 - Fails or counts are missing: leave it `false`. The vocabulary is built from listed bookmarks.
 
-### [ ] 5. How do OpenRouter's Jev listing and any Cloudflare route behave?
+### [ ] 5. Can Jev be reached through OpenRouter or a Cloudflare route?
 
 Only matters if you want Jev. Send one tiny request through each route you have access to (OpenRouter model page for the Jev model, or your Cloudflare AI Gateway), and check it answers in Jev's question format.
 
@@ -148,6 +148,11 @@ Pass: the bookmark moves out of Unsorted with tags. With IFTTT set up, also pass
 
 Start a real backfill on a library of a few hundred bookmarks, then `docker kill` (or stop the Cloudflare container) part way through. Restart.
 
-Pass: the job returns to `running` on its own, resumes from its checkpoint, and finishes with no bookmark processed twice in a harmful way. Repeat on Cloudflare: also confirm the Worker keeps the container awake during the job (the container does not sleep while `GET /v1/jobs` shows a running job) and that Litestream restores the database after a cold start.
+Pass: the job returns to `running` on its own, resumes from its checkpoint, and finishes with no bookmark processed twice in a harmful way. Litestream restores the database after a cold start.
+
+Repeat on Cloudflare, and test both halves of the keep-awake design (`sleepAfter` is about 10 minutes, and the cron runs every 30):
+
+- **A running job outlives `sleepAfter`.** Start a backfill that runs longer than `sleepAfter` and watch the container. At each expiry `onActivityExpired` asks `GET /v1/jobs?active=true`; the container must stay up until the job finishes, with no restart.
+- **An idle container sleeps.** After the job finishes (or with none running), the container must stop within about one `sleepAfter` and not wake until a cron tick or webhook arrives. Check it stays asleep between ticks, since a container that never sleeps costs money.
 
 Item 4 of the definition of done (a manual move survives later syncs and backfills) is covered by tests against fakes. Confirm it live by moving one bookmark by hand after a backfill and running another sync.

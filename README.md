@@ -128,7 +128,7 @@ Everything except `GET /healthz` and `POST /v1/webhooks/{provider}` needs `Autho
 
 | Route | Purpose |
 |---|---|
-| `POST /v1/jobs`, `GET /v1/jobs`, `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}` | Create (`sync`, `backfill`, `reclassify`, `snapshot`, `restore`), list, get, cancel. `Idempotency-Key` is honored. |
+| `POST /v1/jobs`, `GET /v1/jobs`, `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}` | Create (`sync`, `backfill`, `reclassify`, `snapshot`, `restore`), list, get, cancel. `Idempotency-Key` is honored. `GET /v1/jobs?active=true` returns just the running jobs in one page with no cursor, for callers that need to know whether the service is busy. |
 | `GET /v1/jobs/{id}/decisions`, `GET /v1/jobs/{id}/proposed-tags` | Plan or result; new tags with counts |
 | `GET /v1/providers`, `GET /v1/classifiers` | Configuration and capabilities |
 | `GET /v1/taxonomies[/{id}]`, `PUT /v1/taxonomies/{id}`, `GET /v1/taxonomies/{id}/proposals` | Read, replace, proposed collections |

@@ -16,9 +16,10 @@
     "bindings": [{ "name": "RAINWISE", "class_name": "RainwiseContainer" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RainwiseContainer"] }],
-  // Every 5 minutes: create a sync job, and keep the container awake while any
-  // job is active. A 409 automation_disabled is expected until you opt in.
-  "triggers": { "crons": ["*/5 * * * *"] }
+  // Every 30 minutes (scheduler.sync_every): create a sync job. Keeping the
+  // container awake during a job is done by the Container class. A 409
+  // automation_disabled is expected until you opt in.
+  "triggers": { "crons": ["*/30 * * * *"] }
   // Secrets (set with `wrangler secret put NAME`), all passed on to the container:
   //   RAINWISE_API_TOKEN, RAINDROP_TOKEN, RAINDROP_WEBHOOK_SECRET, RAINWISE_MODEL,
   //   OPENROUTER_API_KEY, LITESTREAM_BUCKET, LITESTREAM_ENDPOINT,

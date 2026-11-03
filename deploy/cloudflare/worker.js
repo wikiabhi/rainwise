@@ -1,5 +1,6 @@
-// Forwards traffic to the Rainwise container and, on a 5-minute cron, creates a
-// sync job and keeps the container awake while any job is active.
+// Forwards traffic to the Rainwise container. A 30-minute cron creates a sync job
+// (matching scheduler.sync_every); when the container has been idle for sleepAfter,
+// it asks the app whether a job is running and either stays up or sleeps.
 // UNTESTED against Cloudflare; see README.md in this folder.
 import { Container, getContainer } from "@cloudflare/containers";
 
@@ -17,20 +18,42 @@ const PASSTHROUGH = [
 
 export class RainwiseContainer extends Container {
   defaultPort = 8080;
-  // Longer than the 5-minute cron. Each cron tick's requests renew the timer, so
-  // while a job is active the container never idles for this long. With no
-  // active job it may sleep, and the next cron or webhook wakes it.
-  sleepAfter = "15m";
+  // Every request renews this timer, including the cron's. With the cron every
+  // 30 minutes, an idle container outlives sleepAfter and reaches
+  // onActivityExpired, which decides between staying up and sleeping.
+  sleepAfter = "10m";
 
   constructor(ctx, env) {
     super(ctx, env);
+    this.apiToken = env.RAINWISE_API_TOKEN;
     this.envVars = Object.fromEntries(
       PASSTHROUGH.filter((k) => env[k] !== undefined).map((k) => [k, env[k]]),
     );
   }
-}
 
-const isActive = (job) => job.status === "queued" || job.status === "running" || job.status === "cancelling";
+  // Runs when sleepAfter passes with no requests. A job in progress keeps the
+  // container up for another period; otherwise it stops. If the app cannot be
+  // asked, stay up: stopping mid-job costs a resume, staying up costs minutes.
+  async onActivityExpired() {
+    let busy = true;
+    try {
+      const res = await this.containerFetch("http://container/v1/jobs?active=true", {
+        headers: { Authorization: `Bearer ${this.apiToken}` },
+      });
+      if (res.ok) {
+        const { items = [] } = await res.json();
+        busy = items.length > 0;
+      }
+    } catch (err) {
+      console.error("active job check failed", err);
+    }
+    if (busy) {
+      this.renewActivityTimeout();
+    } else {
+      await this.stop();
+    }
+  }
+}
 
 export default {
   async fetch(request, env) {
@@ -38,41 +61,25 @@ export default {
   },
 
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(tick(env));
+    ctx.waitUntil(createSync(env));
   },
 };
 
-async function tick(env) {
-  const container = getContainer(env.RAINWISE);
-  const headers = {
-    Authorization: `Bearer ${env.RAINWISE_API_TOKEN}`,
-    "Content-Type": "application/json",
-  };
-  const base = "http://container";
-
-  // 200 (already queued or running) and 202 are both fine. 409 automation_disabled
-  // is expected until automation.enabled is true. Anything else is logged.
-  const created = await container.fetch(`${base}/v1/jobs`, {
+// 200 (a sync is already queued or running) and 202 are fine. 409 automation_disabled
+// is expected until automation.enabled is true; the request still wakes the
+// container briefly, and it sleeps again after sleepAfter.
+async function createSync(env) {
+  const res = await getContainer(env.RAINWISE).fetch("http://container/v1/jobs", {
     method: "POST",
-    headers,
+    headers: {
+      Authorization: `Bearer ${env.RAINWISE_API_TOKEN}`,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify({ type: "sync" }),
   });
-  if (![200, 202, 409].includes(created.status)) {
-    console.error("sync job create failed", created.status, await created.text());
+  if (![200, 202, 409].includes(res.status)) {
+    console.error("sync job create failed", res.status, await res.text());
   } else {
-    await created.body?.cancel();
-  }
-
-  // Requesting the job list is itself activity, which renews sleepAfter. Doing it
-  // on every tick keeps the container up while a backfill or restore is running,
-  // and lets it sleep once none is.
-  const list = await container.fetch(`${base}/v1/jobs?limit=20`, { headers });
-  if (!list.ok) {
-    console.error("job list failed", list.status);
-    return;
-  }
-  const { items = [] } = await list.json();
-  if (items.some(isActive)) {
-    await container.renewActivityTimeout();
+    await res.body?.cancel();
   }
 }

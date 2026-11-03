@@ -90,6 +90,15 @@ func (s *server) createJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listJobs(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Query().Get("active") {
+	case "":
+	case "true":
+		s.listActiveJobs(w, r)
+		return
+	default:
+		s.fail(w, badRequest("active must be true"))
+		return
+	}
 	cursor, limit, err := listParams(r)
 	if err != nil {
 		s.fail(w, err)
@@ -105,6 +114,22 @@ func (s *server) listJobs(w http.ResponseWriter, r *http.Request) {
 		items[i] = viewJob(j)
 	}
 	writeJSON(w, http.StatusOK, newPage(items, p.NextToken))
+}
+
+// listActiveJobs answers GET /v1/jobs?active=true with the running jobs, oldest
+// first, in one page with no cursor. Queued jobs are claimed promptly while the
+// process is awake, so a caller asking whether the service is busy needs only these.
+func (s *server) listActiveJobs(w http.ResponseWriter, r *http.Request) {
+	running, err := s.Store.Jobs().ListRunning(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	items := make([]jobView, len(running))
+	for i, j := range running {
+		items[i] = viewJob(j)
+	}
+	writeJSON(w, http.StatusOK, newPage(items, ""))
 }
 
 func (s *server) getJob(w http.ResponseWriter, r *http.Request) {

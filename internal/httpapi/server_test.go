@@ -660,3 +660,35 @@ func TestHealthz(t *testing.T) {
 		t.Fatal("leaks detail")
 	}
 }
+
+func TestListActiveJobs(t *testing.T) {
+	e := newEnv(t)
+	r := e.do("GET", "/v1/jobs?active=true", "")
+	want(t, r, 200)
+	if items, ok := r.json()["items"].([]any); !ok || len(items) != 0 {
+		t.Fatalf("idle items = %v", r.json()["items"])
+	}
+	a := e.do("POST", "/v1/jobs", `{"type":"backfill","dry_run":true}`)
+	want(t, a, 202)
+	b := e.do("POST", "/v1/jobs", `{"type":"snapshot"}`)
+	want(t, b, 202)
+	// Only the first becomes running; the other stays queued.
+	ctx := context.Background()
+	j, err := e.store.Jobs().GetJob(ctx, a.json()["id"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.Status = domain.JobRunning
+	if err := e.store.Jobs().UpdateJob(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+	m := e.do("GET", "/v1/jobs?active=true&limit=1", "").json()
+	items := m["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["id"] != j.ID {
+		t.Fatalf("items = %v", items)
+	}
+	if m["next_cursor"] != nil {
+		t.Fatalf("next_cursor = %v", m["next_cursor"])
+	}
+	want(t, e.do("GET", "/v1/jobs?active=false", ""), 400)
+}

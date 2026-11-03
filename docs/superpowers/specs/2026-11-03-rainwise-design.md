@@ -347,7 +347,7 @@ Status codes: `200`, `201`, `202` (accepted, async), `400` (malformed), `401`, `
 | `GET /healthz` | Liveness and store check |
 | `POST /v1/webhooks/{provider}` | Ingest events. `202` once saved. |
 | `POST /v1/jobs` | Create a job. `202`. |
-| `GET /v1/jobs`, `GET /v1/jobs/{id}` | List jobs, or get status and progress |
+| `GET /v1/jobs`, `GET /v1/jobs/{id}` | List jobs, or get status and progress. `GET /v1/jobs?active=true` returns the running jobs in one page, with no cursor. |
 | `DELETE /v1/jobs/{id}` | Cancel. `202`, or `409` if already finished. |
 | `GET /v1/jobs/{id}/decisions` | Per-bookmark plan or result |
 | `GET /v1/jobs/{id}/proposed-tags` | A dry run's new tags, with counts |
@@ -743,7 +743,7 @@ One process runs one provider in the MVP. The code keys everything by provider, 
 - A small Worker forwards API and webhook traffic to the container, and has a cron trigger for `POST /v1/jobs` (sync).
 - The app's built-in scheduler stays off here, because a sleeping container can't fire timers.
 - [Litestream](https://litestream.io) replicates SQLite to R2 over its S3 API and [restores at startup](https://docs.openclaw.ai/install/cloudflare), before the app starts. It's in the image's entrypoint for this deployment only.
-- **A running job must keep the container awake.** The Worker's cron runs every 5 minutes, and the sleep timeout is longer than this while a job is active. When none is active, the container may sleep and the next cron or webhook wakes it. The exact mechanism is left to the builder and verified in a deployed test.
+- **A running job must keep the container awake.** The Worker's cron runs every 30 minutes (matching `sync_every`) and only creates the sync job. When the container's `sleepAfter` (about 10 minutes) expires, the Container class asks the app whether a job is running (`GET /v1/jobs?active=true`): if so it stays up for another period, otherwise it stops, and the next cron or webhook wakes it. The exact mechanism is left to the builder and verified in a deployed test.
 - Containers may be beta; that's a risk accepted by the user's choice of platform. The docker-compose path is the alternative.
 
 ## 14. Project Structure

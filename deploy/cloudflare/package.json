@@ -2,5 +2,5 @@
   "name": "rainwise-cloudflare",
   "private": true,
   "type": "module",
-  "dependencies": { "@cloudflare/containers": "latest" }
+  "dependencies": { "@cloudflare/containers": "0.3.7" }
 }
