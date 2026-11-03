@@ -99,6 +99,25 @@ func Run(t *testing.T, newStore func(t *testing.T) ports.Store) {
 		}
 	})
 
+	t.Run("ResetClaimed", func(t *testing.T) {
+		ev := newStore(t).Events()
+		_, err := ev.InsertEvent(ctx, event("a", "k1"))
+		must(t, err)
+		got, err := ev.ClaimEvents(ctx, t0, 10)
+		must(t, err)
+		again, err := ev.ClaimEvents(ctx, t0, 10)
+		must(t, err)
+		if len(got) != 1 || len(again) != 0 {
+			t.Fatalf("claims = %d then %d, want 1 then 0", len(got), len(again))
+		}
+		must(t, ev.ResetClaimed(ctx))
+		again, err = ev.ClaimEvents(ctx, t0, 10)
+		must(t, err)
+		if len(again) != 1 {
+			t.Errorf("after reset claimed %d, want 1", len(again))
+		}
+	})
+
 	t.Run("DropHeldBefore", func(t *testing.T) {
 		ev := newStore(t).Events()
 		old := event("old", "k1")

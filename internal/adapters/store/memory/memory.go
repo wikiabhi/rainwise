@@ -321,6 +321,13 @@ func (e *eventStore) UpdateEvent(_ context.Context, ev domain.StoredEvent) error
 	return nil
 }
 
+func (e *eventStore) ResetClaimed(context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	clear(e.claimed)
+	return nil
+}
+
 func (e *eventStore) DropHeldBefore(_ context.Context, t time.Time) (int, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()

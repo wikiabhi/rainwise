@@ -38,6 +38,8 @@ type EventStore interface {
 	ClaimEvents(ctx context.Context, now time.Time, limit int) ([]domain.StoredEvent, error)
 	UpdateEvent(ctx context.Context, e domain.StoredEvent) error
 	DropHeldBefore(ctx context.Context, t time.Time) (int, error)
+	// ResetClaimed makes events claimed by a previous process claimable again.
+	ResetClaimed(ctx context.Context) error
 }
 
 type StateStore interface {

@@ -87,6 +87,11 @@ func (s eventStore) UpdateEvent(ctx context.Context, e domain.StoredEvent) error
 	return nil
 }
 
+func (s eventStore) ResetClaimed(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE events SET claimed = 0 WHERE claimed = 1`)
+	return err
+}
+
 func (s eventStore) DropHeldBefore(ctx context.Context, t time.Time) (int, error) {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM events WHERE status = 'held' AND received_at < ?`, fmtTime(t))
 	if err != nil {

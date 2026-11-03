@@ -1,12 +1,10 @@
 package jobs
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -213,22 +211,7 @@ func (d Deps) scanLibrary(ctx context.Context, job *domain.Job, rc RunContext, m
 
 // listedTags asks the provider for tag counts, reporting whether it could.
 func (d Deps) listedTags(ctx context.Context) (map[string]int, bool, error) {
-	lister, ok := d.Provider.(ports.TagLister)
-	if !ok || !d.Provider.Capabilities().TagListing {
-		return nil, false, nil
-	}
-	listed, err := lister.ListTags(ctx)
-	if errors.Is(err, domain.ErrCapabilityUnsupported) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("list tags: %w", err)
-	}
-	counts := make(map[string]int, len(listed))
-	for _, t := range listed {
-		counts[t.Name] = t.Count
-	}
-	return counts, true, nil
+	return taxonomy.ListedTags(ctx, d.Provider)
 }
 
 // vocabularyTerms returns the most-used tags, from the tag lister if there is one.
@@ -247,16 +230,7 @@ func (d Deps) vocabularyTerms(ctx context.Context, job *domain.Job, rc RunContex
 		}
 		counts = scan.tags
 	}
-	terms := make([]string, 0, len(counts))
-	for name := range counts {
-		terms = append(terms, name)
-	}
-	slices.SortFunc(terms, func(a, b string) int {
-		return cmp.Or(cmp.Compare(counts[b], counts[a]), strings.Compare(a, b))
-	})
-	if len(terms) > d.TagVocabSize {
-		terms = terms[:d.TagVocabSize]
-	}
+	terms := taxonomy.TopTerms(counts, d.TagVocabSize)
 	return terms, scan, nil
 }
 
