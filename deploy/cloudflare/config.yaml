@@ -1,0 +1,132 @@
+# Config for the Cloudflare Containers deployment: built-in scheduler off (a sleeping
+# container cannot fire timers; the Worker cron triggers syncs) and a durable wait
+# so Litestream can copy a snapshot to R2 before a job writes. See examples/config.yaml.
+
+server:
+  addr: ":8080"
+  api_token: ${RAINWISE_API_TOKEN}
+
+state:
+  sqlite_path: /data/rainwise.db
+  # How long a real backfill or reclassify waits after committing its snapshot,
+  # so a replicator can copy it off the machine. 0s is right for a normal disk
+  # volume. The Cloudflare deployment uses 30s.
+  durable_wait: 30s
+  snapshot_retention: 10
+
+# The one switch for writes nobody asked for. While false, real sync jobs return
+# 409 automation_disabled and webhook events are saved but not processed.
+# Explicit backfill, reclassify, snapshot and restore jobs work either way.
+automation:
+  enabled: false
+
+# Built-in timer for sync jobs. Needs automation.enabled. Leave off where the
+# process can sleep (Cloudflare) and trigger syncs from outside instead.
+scheduler:
+  enabled: false
+  sync_every: 30m
+
+processing:
+  provider: raindrop
+  taxonomy: default
+  concurrency: 4
+  content_fetch: auto          # off | auto | always
+  content_fetch_min_chars: 80
+  on_move_retag: false
+  tag_vocab_size: 200
+
+providers:
+  raindrop:
+    type: raindrop
+    token: ${RAINDROP_TOKEN}
+    webhook_secret: ${RAINDROP_WEBHOOK_SECRET}
+    requests_per_minute: 100
+    # Both default to false and are not part of the design's YAML sketch. Each
+    # declares a Raindrop feature that docs/live-checks.md must confirm first.
+    #
+    # incremental_since: true makes sync list only bookmarks changed since the
+    # last run (minus 48h) instead of scanning the whole library. Turn it on
+    # only after live check 1 shows the lastUpdate: filter works through the
+    # API search parameter.
+    incremental_since: false
+    # tag_listing: true builds the tag vocabulary from Raindrop's tag endpoint
+    # instead of from listed bookmarks. Turn it on only after live check 4
+    # shows GET /tags returns usable counts.
+    tag_listing: false
+
+classifiers:
+  # Any OpenAI-compatible endpoint works through type: llm. Pick a model that
+  # supports strict JSON schema output (see docs/live-checks.md). With
+  # OpenRouter, require_parameters stops the schema being silently ignored.
+  openrouter:
+    type: llm
+    base_url: https://openrouter.ai/api/v1
+    model: ${RAINWISE_MODEL}
+    api_key: ${OPENROUTER_API_KEY}
+    extra_body: {provider: {require_parameters: true}}
+  # Cloudflare AI Gateway uses the same adapter. Add it, set the variables, and
+  # point roles at it:
+  #
+  # cf_gateway:
+  #   type: llm
+  #   base_url: ${CF_AI_GATEWAY_URL}
+  #   model: ${RAINWISE_MODEL}
+  #   api_key: ${CF_AI_GATEWAY_KEY}
+  #
+  # Jev is optional and stays off until you have a working access route:
+  #
+  # jev:
+  #   type: jev
+  #   base_url: https://api.typesafe.ai
+  #   model: jev-latest
+  #   api_key: ${JEV_API_KEY}
+  #   max_tag_candidates: 100
+  #   tag_threshold: 0.7
+
+roles:
+  classifier: openrouter
+  proposer: openrouter
+  fallback: null   # runs only after the primary errors, never for low confidence
+
+taxonomies:
+  default:
+    mode: fixed
+    collections:
+      - key: ai_engineering
+        name: AI Engineering & Agents
+        description: LLMs, agents, prompting, evals, RAG, model APIs and tooling.
+      - key: system_design
+        name: System Design & Architecture
+        description: Distributed systems, scalability, architecture patterns, case studies.
+      - key: backend
+        name: Backend & Software Engineering
+        description: Server-side engineering, databases, APIs, languages, testing.
+      - key: interview_prep
+        name: Interview Preparation
+        description: Coding problems, interview guides, question banks, mock interviews.
+      - key: career
+        name: Career & Opportunities
+        description: Job postings, hiring, resumes, career growth, compensation.
+      - key: dev_tools
+        name: Developer Tools & Open Source
+        description: Libraries, CLIs, editors, infrastructure tools, open-source projects.
+      - key: learning
+        name: Learning & Reading Lists
+        description: Courses, books, long reads and reference material to study later.
+      - key: personal
+        name: Personal & Life
+        description: Health, finance, travel, hobbies and other non-work topics.
+      - key: needs_review
+        name: Needs Review
+        description: Reserved for low-confidence items.
+        role: review   # never offered to the classifier
+    rules:
+      min_tags: 2
+      max_tags: 5
+      min_confidence: 0.6
+      allow_new_tags: true
+      tag_aliases: {k8s: kubernetes, golang: go}
+      prompt_extra: ""
+    # Creates the collections above on the first real run, because they won't
+    # exist in a fresh library. With false, missing ones fail the job up front.
+    provision_missing_collections: true
