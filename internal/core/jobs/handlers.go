@@ -232,7 +232,26 @@ func (d Deps) vocabularyTerms(ctx context.Context, job *domain.Job, rc RunContex
 	return terms, scan, nil
 }
 
-// bookmarkLister lists the bookmarks in scope as work items.
+// rememberTags adds the new tags a real run wrote to the persisted vocabulary. Sync
+// reads that instead of scanning the library, so it wouldn't see them otherwise.
+func (d Deps) rememberTags(ctx context.Context, job *domain.Job, out pipeline.Outcome, vocab *taxonomy.RunVocab) error {
+	if job.DryRun || (out.Status != pipeline.Changed && out.Status != pipeline.NeedsReview) {
+		return nil
+	}
+	var added []string
+	for _, t := range out.Record.AddTags {
+		if _, known := vocab.Existing(t); !known {
+			added = append(added, t)
+		}
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	return taxonomy.AppendVocab(ctx, d.Store.BookmarkStates(), d.Provider.Name(), added, d.TagVocabSize)
+}
+
+// bookmarkLister lists the bookmarks in scope as work items, each carrying what the
+// listing said so that an unchanged one costs no further read.
 func (d Deps) bookmarkLister(job *domain.Job, since *time.Time, match scopeMatcher) ListFunc {
 	return func(ctx context.Context, token string) ([]pipeline.WorkItem, string, error) {
 		page, err := d.Provider.ListBookmarks(ctx, ports.ListQuery{Since: since, PageToken: token, Limit: job.Params.BatchSize})
@@ -242,7 +261,7 @@ func (d Deps) bookmarkLister(job *domain.Job, since *time.Time, match scopeMatch
 		items := make([]pipeline.WorkItem, 0, len(page.Items))
 		for _, b := range page.Items {
 			if match.matches(b) {
-				items = append(items, pipeline.WorkItem{Bookmark: b.ID})
+				items = append(items, pipeline.WorkItem{Bookmark: b.ID, Listed: &b})
 			}
 		}
 		return items, page.NextToken, nil

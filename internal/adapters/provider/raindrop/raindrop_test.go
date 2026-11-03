@@ -669,3 +669,27 @@ func TestResolveURLTolerantCompare(t *testing.T) {
 		}
 	}
 }
+
+func TestListedHighlights(t *testing.T) {
+	p, _ := setup(t, func(w http.ResponseWriter, r *http.Request) {
+		with := item(1, 5)
+		with["highlights"] = []any{map[string]any{"_id": "h1", "text": "quote", "created": "2026-10-03T00:00:00.000Z"}}
+		none := item(2, 5)
+		none["highlights"] = []any{}
+		writeJSON(w, map[string]any{"items": []any{with, none, item(3, 5)}, "count": 3})
+	}, nil)
+	pg, err := p.ListBookmarks(context.Background(), ports.ListQuery{})
+	if err != nil || len(pg.Items) != 3 {
+		t.Fatalf("%v %+v", err, pg)
+	}
+	hs := pg.Items[0].Highlights
+	if len(hs) != 1 || hs[0].ID.Local != "h1" || hs[0].Bookmark != rid(1) || hs[0].Text != "quote" || hs[0].CreatedAt.IsZero() {
+		t.Errorf("highlights = %+v", hs)
+	}
+	if hs := pg.Items[1].Highlights; hs == nil || len(hs) != 0 {
+		t.Errorf("an empty list must read as none, got %#v", hs)
+	}
+	if hs := pg.Items[2].Highlights; hs != nil {
+		t.Errorf("an absent field must read as unknown, got %#v", hs)
+	}
+}

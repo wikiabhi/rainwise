@@ -381,8 +381,9 @@ func TestSyncWatermark(t *testing.T) {
 		}
 	})
 
-	t.Run("failed items keep it unchanged", func(t *testing.T) {
+	t.Run("failed items keep it unchanged on an incremental listing", func(t *testing.T) {
 		e := newJobEnv(t)
+		incremental(e)
 		e.addBookmark(1, pfake.Inbox)
 		e.putWatermark(wm)
 		e.cls.Script(cfake.Result{Err: errors.New("boom")})
@@ -392,6 +393,25 @@ func TestSyncWatermark(t *testing.T) {
 		}
 		if got, _ := e.watermark(); !got.Equal(wm) {
 			t.Errorf("watermark = %v, want %v", got, wm)
+		}
+	})
+
+	t.Run("failed items don't hold back a full listing", func(t *testing.T) {
+		e := newJobEnv(t)
+		e.addBookmark(1, pfake.Inbox)
+		e.putWatermark(wm)
+		e.cls.Script(cfake.Result{Err: errors.New("boom")})
+		job := e.syncNow()
+		if job.Progress.Failed != 1 {
+			t.Fatalf("progress = %+v", job.Progress)
+		}
+		if got, _ := e.watermark(); !got.Equal(t0) {
+			t.Errorf("watermark = %v, want job start %v", got, t0)
+		}
+		// The next full listing comes back to the item.
+		e.cls.Script(cfake.Result{Decision: classified("a", 0.9)})
+		if job := e.syncNow(); job.Progress.Failed != 0 || e.collectionOf(bmID(1)) != colAlpha {
+			t.Errorf("not retried: %+v in %v", job.Progress, e.collectionOf(bmID(1)))
 		}
 	})
 
@@ -524,9 +544,12 @@ func TestSyncHighlights(t *testing.T) {
 		}
 	})
 
-	t.Run("failed highlight keeps the watermark", func(t *testing.T) {
+	t.Run("failed highlight keeps the watermark on an incremental listing", func(t *testing.T) {
 		e := newJobEnv(t)
 		id := e.settledBookmark(1)
+		caps := e.provider.Capabilities()
+		caps.IncrementalSince = true
+		e.provider.SetCapabilities(caps)
 		before, _ := e.watermark()
 		e.cls.Script(cfake.Result{Err: errors.New("boom")})
 		e.provider.AddHighlight(domain.Highlight{ID: domain.ID{Provider: "fake", Local: "h1"}, Bookmark: id, Text: "x", CreatedAt: t0.Add(time.Minute)})
@@ -734,4 +757,362 @@ func TestRealSyncRefusedWithAutomationOff(t *testing.T) {
 	if err := h.Run(context.Background(), job, RunContext{}); !errors.Is(err, domain.ErrAutomationDisabled) {
 		t.Fatalf("err = %v", err)
 	}
+}
+
+func (e *jobEnv) baselineDone() bool {
+	_, ok := e.setting("sync_baseline_done:fake")
+	return ok
+}
+
+func TestSyncBaselineOutlivesFailures(t *testing.T) {
+	boom := cfake.Result{Err: errors.New("boom")}
+	ok := cfake.Result{Decision: classified("a", 0.9, "go")}
+
+	for _, incremental := range []bool{false, true} {
+		name := "full listing"
+		if incremental {
+			name = "incremental listing"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newJobEnv(t)
+			caps := e.provider.Capabilities()
+			caps.IncrementalSince = incremental
+			e.provider.SetCapabilities(caps)
+			bad := e.addBookmark(1, pfake.Inbox)
+			old := e.addBookmark(2, colBeta)
+			e.provider.AddHighlight(domain.Highlight{ID: domain.ID{Provider: "fake", Local: "old"}, Bookmark: old, Text: "x", CreatedAt: t0.Add(-time.Hour)})
+			e.cls.Script(boom)
+
+			first := e.syncNow()
+			if first.Progress.Failed != 1 {
+				t.Fatalf("progress = %+v", first.Progress)
+			}
+			if !e.baselineDone() {
+				t.Fatal("the first listing finished, so the baseline is done")
+			}
+			if _, set := e.watermark(); set == incremental {
+				t.Fatalf("watermark set = %v with incremental = %v", set, incremental)
+			}
+			if st := e.state(old); st.PinSource != domain.PinBaseline {
+				t.Fatalf("old bookmark: %+v", st)
+			}
+
+			// Later: a bookmark saved directly isn't baseline, and highlights run.
+			e.cls.Script(ok)
+			e.setNow(t0.Add(time.Hour))
+			direct := e.addBookmark(3, colBeta)
+			e.provider.Add(domain.Bookmark{ID: direct, URL: "https://example.test/3", Title: "Post 3", Description: handlerText, Collection: colBeta, UpdatedAt: t0.Add(time.Hour)})
+			e.provider.AddHighlight(domain.Highlight{ID: domain.ID{Provider: "fake", Local: "new"}, Bookmark: old, Text: "y", CreatedAt: t0.Add(time.Minute)})
+			before := e.cls.Calls()
+
+			second := e.syncNow()
+			if second.Progress.Failed != 0 {
+				t.Fatalf("progress = %+v", second.Progress)
+			}
+			if e.collectionOf(bad) != colAlpha {
+				t.Errorf("failed inbox item wasn't retried: in %v", e.collectionOf(bad))
+			}
+			if st := e.state(direct); st.PinSource != domain.PinUser {
+				t.Errorf("new bookmark treated as baseline: %+v", st)
+			}
+			var focuses []string
+			for _, r := range e.cls.Requests()[before:] {
+				if r.Subject.FocusHighlight != nil {
+					focuses = append(focuses, r.Subject.FocusHighlight.ID.Local)
+				}
+			}
+			if !slices.Equal(focuses, []string{"new"}) {
+				t.Errorf("highlights run = %v, want only the one made after the baseline", focuses)
+			}
+			if at, set := e.watermark(); !set || !at.Equal(t0.Add(time.Hour)) {
+				t.Errorf("watermark = %v, %v", at, set)
+			}
+		})
+	}
+
+	t.Run("a watermark from before this setting counts as done", func(t *testing.T) {
+		e := newJobEnv(t)
+		e.putWatermark(t0.Add(-time.Hour))
+		id := e.addBookmark(1, colBeta)
+		e.syncNow()
+		if st := e.state(id); st.PinSource == domain.PinBaseline {
+			t.Errorf("baselined again: %+v", st)
+		}
+	})
+
+	t.Run("a dry run doesn't finish it", func(t *testing.T) {
+		e := newJobEnv(t)
+		e.addBookmark(1, colBeta)
+		e.mustRun(e.newJob(domain.JobSync, func(j *domain.Job) { j.DryRun = true }))
+		if e.baselineDone() {
+			t.Error("dry run set it")
+		}
+	})
+
+	t.Run("an unfinished listing doesn't finish it", func(t *testing.T) {
+		e := newJobEnv(t)
+		job := e.newJob(domain.JobSync, nil)
+		e.logged.failLists(domain.ErrTemporary)
+		if err := e.runJob(job); !errors.Is(err, domain.ErrTemporary) {
+			t.Fatalf("err = %v", err)
+		}
+		if e.baselineDone() {
+			t.Error("listing failure set it")
+		}
+	})
+}
+
+// listedEnv has a library whose listings carry highlights, past its baseline.
+func listedEnv(t *testing.T) (*jobEnv, domain.ID) {
+	t.Helper()
+	e := newJobEnv(t)
+	e.provider.SetListedHighlights(true)
+	id := e.settledBookmark(1)
+	return e, id
+}
+
+func TestSyncFromListings(t *testing.T) {
+	t.Run("an idle sync lists and reads nothing else", func(t *testing.T) {
+		e, _ := listedEnv(t)
+		for n := 2; n <= 120; n++ {
+			e.addBookmark(n, colBeta)
+		}
+		e.syncNow() // These are new now: tags-only runs, then pins.
+		before, calls := e.provider.Calls(), e.cls.Calls()
+		e.setNow(t0.Add(time.Hour))
+		e.syncNow()
+		after := e.provider.Calls()
+		if got := after.List - before.List; got != 3 {
+			t.Errorf("list calls = %d, want 3 for 120 bookmarks", got)
+		}
+		if after.Get != before.Get || after.Highlights != before.Highlights || after.HighlightFeed != before.HighlightFeed {
+			t.Errorf("extra reads: %+v, then %+v", before, after)
+		}
+		if e.cls.Calls() != calls {
+			t.Errorf("classifier ran %d times", e.cls.Calls()-calls)
+		}
+	})
+
+	t.Run("a new highlight gets a tags-only run without the feed", func(t *testing.T) {
+		e, id := listedEnv(t)
+		calls, feed := e.cls.Calls(), e.provider.Calls().HighlightFeed
+		focus := domain.ID{Provider: "fake", Local: "h1"}
+		e.provider.AddHighlight(domain.Highlight{ID: focus, Bookmark: id, Text: "a highlighted thing", CreatedAt: t0.Add(time.Minute)})
+		e.provider.AddHighlight(domain.Highlight{ID: domain.ID{Provider: "fake", Local: "h0"}, Bookmark: id, Text: "an old one", CreatedAt: t0.Add(-time.Minute)})
+		e.setNow(t0.Add(time.Hour))
+		e.syncNow()
+
+		if got := e.provider.Calls().HighlightFeed; got != feed {
+			t.Errorf("paged the feed %d times", got-feed)
+		}
+		reqs := e.cls.Requests()[calls:]
+		if len(reqs) != 1 || reqs[0].WantCollection || reqs[0].Subject.FocusHighlight == nil || reqs[0].Subject.FocusHighlight.ID != focus {
+			t.Fatalf("requests = %+v", reqs)
+		}
+		if !slices.Contains(e.tagsOf(id), "from-highlight") {
+			t.Errorf("tags = %q", e.tagsOf(id))
+		}
+		// Handled: the next sync neither classifies nor writes.
+		calls, writes := e.cls.Calls(), len(e.provider.Writes())
+		e.setNow(t0.Add(2 * time.Hour))
+		e.syncNow()
+		if e.cls.Calls() != calls || len(e.provider.Writes()) != writes {
+			t.Errorf("repeated: calls %d->%d, writes %d->%d", calls, e.cls.Calls(), writes, len(e.provider.Writes()))
+		}
+	})
+
+	t.Run("a first sync leaves listed highlights alone", func(t *testing.T) {
+		e := newJobEnv(t)
+		e.provider.SetListedHighlights(true)
+		id := e.addBookmark(1, colBeta)
+		e.provider.AddHighlight(domain.Highlight{ID: domain.ID{Provider: "fake", Local: "h1"}, Bookmark: id, Text: "x", CreatedAt: t0})
+		e.syncNow()
+		if e.cls.Calls() != 0 || e.provider.Calls().HighlightFeed != 0 {
+			t.Errorf("classifier %d, calls %+v", e.cls.Calls(), e.provider.Calls())
+		}
+	})
+
+	t.Run("an incremental listing can't vouch for highlights, so the feed stays", func(t *testing.T) {
+		e, id := listedEnv(t)
+		caps := e.provider.Capabilities()
+		caps.IncrementalSince = true
+		e.provider.SetCapabilities(caps)
+		feed := e.provider.Calls().HighlightFeed
+		// The bookmark's own lastUpdate is old, so the listing leaves it out.
+		e.provider.AddHighlight(domain.Highlight{ID: domain.ID{Provider: "fake", Local: "h1"}, Bookmark: id, Text: "x", CreatedAt: t0.Add(time.Minute)})
+		e.setNow(t0.Add(100 * time.Hour))
+		e.syncNow()
+		if got := e.provider.Calls().HighlightFeed; got == feed {
+			t.Error("the feed wasn't paged")
+		}
+		if !slices.Contains(e.tagsOf(id), "from-highlight") {
+			t.Errorf("tags = %q", e.tagsOf(id))
+		}
+	})
+
+	t.Run("a listing that doesn't say keeps the feed", func(t *testing.T) {
+		e := newJobEnv(t)
+		id := e.settledBookmark(1)
+		feed := e.provider.Calls().HighlightFeed
+		e.provider.AddHighlight(domain.Highlight{ID: domain.ID{Provider: "fake", Local: "h1"}, Bookmark: id, Text: "x", CreatedAt: t0.Add(time.Minute)})
+		e.setNow(t0.Add(time.Hour))
+		e.syncNow()
+		if got := e.provider.Calls().HighlightFeed; got == feed {
+			t.Error("the feed wasn't paged")
+		}
+		if !slices.Contains(e.tagsOf(id), "from-highlight") {
+			t.Errorf("tags = %q", e.tagsOf(id))
+		}
+	})
+
+	t.Run("a dry run writes nothing", func(t *testing.T) {
+		e, id := listedEnv(t)
+		writes := len(e.provider.Writes())
+		e.provider.AddHighlight(domain.Highlight{ID: domain.ID{Provider: "fake", Local: "h1"}, Bookmark: id, Text: "x", CreatedAt: t0.Add(time.Minute)})
+		e.setNow(t0.Add(time.Hour))
+		e.mustRun(e.newJob(domain.JobSync, func(j *domain.Job) { j.DryRun = true }))
+		if len(e.provider.Writes()) != writes {
+			t.Errorf("writes = %+v", e.provider.Writes()[writes:])
+		}
+	})
+}
+
+func TestBackfillUsesListings(t *testing.T) {
+	e := newJobEnv(t)
+	e.provider.SetListedHighlights(true)
+	id := e.addBookmark(1, colBeta)
+	e.backfill(nil)
+	if e.collectionOf(id) != colAlpha {
+		t.Fatalf("in %v", e.collectionOf(id))
+	}
+	c := e.provider.Calls()
+	if c.Highlights != 0 {
+		t.Errorf("calls = %+v", c)
+	}
+	// One read for the write that happened: step 8.
+	if c.Get != 1 {
+		t.Errorf("reads = %d, want the step 8 re-read alone", c.Get)
+	}
+}
+
+func TestSyncVocabulary(t *testing.T) {
+	persisted := func(e *jobEnv) []string {
+		e.t.Helper()
+		terms, ok, err := taxonomy.LoadVocab(context.Background(), e.store.BookmarkStates(), "fake")
+		if err != nil || !ok {
+			e.t.Fatalf("LoadVocab = %v, %v", ok, err)
+		}
+		return terms
+	}
+	noListing := func(e *jobEnv) {
+		caps := e.provider.Capabilities()
+		caps.TagListing = false
+		e.provider.SetCapabilities(caps)
+	}
+	allowNew := func(e *jobEnv) {
+		tx := fixedTaxonomy()
+		tx.Rules.AllowNewTags = true
+		e.seedTaxonomy(tx)
+	}
+
+	t.Run("a present vocabulary costs no scan", func(t *testing.T) {
+		e := newJobEnv(t)
+		noListing(e)
+		e.addBookmark(1, colBeta, "seen")
+		e.syncNow()
+		if got := e.provider.Calls().List; got != 2 {
+			t.Fatalf("first sync lists = %d, want the scan and the pass", got)
+		}
+		e.setNow(t0.Add(time.Hour))
+		e.addBookmark(2, colBeta, "later")
+		lists := e.provider.Calls().List
+		e.syncNow()
+		if got := e.provider.Calls().List - lists; got != 1 {
+			t.Errorf("lists = %d, want the pass alone", got)
+		}
+		if got := persisted(e); !slices.Equal(got, []string{"seen"}) {
+			t.Errorf("vocab = %v", got)
+		}
+	})
+
+	t.Run("no ListTags either", func(t *testing.T) {
+		e := newJobEnv(t)
+		e.addBookmark(1, colBeta, "seen")
+		e.syncNow()
+		tags := e.provider.Calls().Tags
+		e.setNow(t0.Add(time.Hour))
+		e.syncNow()
+		if got := e.provider.Calls().Tags; got != tags {
+			t.Errorf("ListTags ran %d more times", got-tags)
+		}
+	})
+
+	t.Run("accepted new tags join it, as the classifier then sees", func(t *testing.T) {
+		e := newJobEnv(t)
+		noListing(e)
+		allowNew(e)
+		e.addBookmark(1, colBeta, "seen")
+		e.syncNow()
+		e.setNow(t0.Add(time.Hour))
+		e.addBookmark(2, pfake.Inbox)
+		e.cls.Script(cfake.Result{Decision: classified("a", 0.9, "brand-new")})
+		e.syncNow()
+		if got := persisted(e); !slices.Equal(got, []string{"seen", "brand-new"}) {
+			t.Fatalf("vocab = %v", got)
+		}
+		e.setNow(t0.Add(2 * time.Hour))
+		e.addBookmark(3, pfake.Inbox)
+		calls := e.cls.Calls()
+		e.syncNow()
+		if got := e.cls.Requests()[calls].TagVocab; !slices.Equal(got, []string{"seen", "brand-new"}) {
+			t.Errorf("classifier's vocab = %v", got)
+		}
+	})
+
+	t.Run("a dry run's tags don't join it", func(t *testing.T) {
+		e := newJobEnv(t)
+		noListing(e)
+		allowNew(e)
+		e.addBookmark(1, colBeta, "seen")
+		e.syncNow()
+		e.setNow(t0.Add(time.Hour))
+		e.addBookmark(2, pfake.Inbox)
+		e.cls.Script(cfake.Result{Decision: classified("a", 0.9, "brand-new")})
+		e.mustRun(e.newJob(domain.JobSync, func(j *domain.Job) { j.DryRun = true }))
+		if got := persisted(e); !slices.Equal(got, []string{"seen"}) {
+			t.Errorf("vocab = %v", got)
+		}
+	})
+
+	t.Run("a backfill refreshes it", func(t *testing.T) {
+		e := newJobEnv(t)
+		noListing(e)
+		e.addBookmark(1, colBeta, "seen")
+		e.syncNow()
+		e.addBookmark(2, colBeta, "later")
+		e.setNow(t0.Add(time.Hour))
+		e.backfill(nil)
+		if got := persisted(e); !slices.Contains(got, "later") {
+			t.Errorf("vocab = %v", got)
+		}
+	})
+
+	t.Run("a backfill's approved tags join it", func(t *testing.T) {
+		e := newJobEnv(t)
+		noListing(e)
+		e.addBookmark(1, colBeta, "seen")
+		e.cls.Script(cfake.Result{Decision: classified("a", 0.9, "approved")})
+		dry := e.backfill(func(j *domain.Job) { j.DryRun = true })
+		e.setNow(t0.Add(time.Hour))
+		e.backfill(func(j *domain.Job) {
+			j.FromDryRun = dry.ID
+			j.Params.ApprovedNewTags = map[string]string{"approved": "approved"}
+		})
+		if got := e.tagsOf(bmID(1)); !slices.Contains(got, "approved") {
+			t.Fatalf("tags = %q", got)
+		}
+		if got := persisted(e); !slices.Contains(got, "approved") {
+			t.Errorf("vocab = %v", got)
+		}
+	})
 }

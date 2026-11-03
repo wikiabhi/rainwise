@@ -49,7 +49,7 @@ func rdID(n int64) domain.ID {
 }
 
 func (r rawItem) bookmark() domain.Bookmark {
-	return domain.Bookmark{
+	b := domain.Bookmark{
 		ID:          rdID(r.ID),
 		URL:         r.Link,
 		Title:       r.Title,
@@ -60,6 +60,14 @@ func (r rawItem) bookmark() domain.Bookmark {
 		CreatedAt:   parseTime(r.Created),
 		UpdatedAt:   parseTime(r.LastUpdate),
 	}
+	// An absent field stays nil, which says only that this response didn't tell.
+	if r.Highlights != nil {
+		b.Highlights = make([]domain.Highlight, 0, len(r.Highlights))
+		for _, h := range r.Highlights {
+			b.Highlights = append(b.Highlights, h.highlight(b.ID))
+		}
+	}
+	return b
 }
 
 func (p *Provider) GetBookmark(ctx context.Context, id domain.ID) (domain.Bookmark, error) {

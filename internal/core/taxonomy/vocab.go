@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/wikiabhi/rainwise/internal/domain"
 	"github.com/wikiabhi/rainwise/internal/ports"
@@ -103,6 +104,27 @@ func AddVocab(terms, added []string, max int) []string {
 		terms = terms[:max-len(fresh)]
 	}
 	return append(slices.Clone(terms), fresh...)
+}
+
+// appendMu keeps the sync job and the webhook worker from losing each other's terms.
+var appendMu sync.Mutex
+
+// AppendVocab adds terms to the persisted vocabulary, by AddVocab's rule.
+func AppendVocab(ctx context.Context, s ports.StateStore, provider string, added []string, max int) error {
+	appendMu.Lock()
+	defer appendMu.Unlock()
+	terms, _, err := LoadVocab(ctx, s, provider)
+	if err != nil {
+		return err
+	}
+	grown := AddVocab(terms, added, max)
+	if slices.Equal(grown, terms) {
+		return nil
+	}
+	if err := SaveVocab(ctx, s, provider, grown); err != nil {
+		return fmt.Errorf("save tag vocabulary: %w", err)
+	}
+	return nil
 }
 
 // ScanLibrary lists every bookmark, page by page, calling visit for each. stop,

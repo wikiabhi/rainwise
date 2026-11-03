@@ -1952,3 +1952,187 @@ func TestWriteAnsweredForAnotherBookmarkStaysPending(t *testing.T) {
 		t.Fatalf("state recorded the write: %+v", st)
 	}
 }
+
+// settled gives bm1 a recorded state as though a run has already handled it in col.
+func (e *env) settled(col domain.ID, hash string, pending *domain.ID) {
+	e.t.Helper()
+	st := domain.BookmarkState{ID: bm1, KnownCollection: col, InputHash: hash, TaxonomyVersion: 3, PendingCollection: pending}
+	if err := e.store.BookmarkStates().PutState(context.Background(), st); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func listedCopy(b domain.Bookmark) *domain.Bookmark {
+	b.Highlights = []domain.Highlight{}
+	return &b
+}
+
+func TestListedBookmark(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("an unchanged one costs no read", func(t *testing.T) {
+		e := newEnv(t)
+		b := inboxBookmark()
+		b.Collection = colA
+		e.provider.Add(b)
+		e.settled(colA, InputHash(b, nil), nil)
+		out, err := e.pipe.Process(ctx, WorkItem{Bookmark: bm1, Listed: listedCopy(b)}, options(TriggerSync))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantStatus(t, out, Skipped)
+		if c := e.provider.Calls(); c.Get != 0 || c.Highlights != 0 {
+			t.Errorf("calls = %+v", c)
+		}
+		if e.cls.Calls() != 0 {
+			t.Errorf("classifier calls = %d", e.cls.Calls())
+		}
+	})
+
+	t.Run("without highlights it asks for them", func(t *testing.T) {
+		e := newEnv(t)
+		b := inboxBookmark()
+		b.Collection = colA
+		e.provider.Add(b)
+		e.provider.AddHighlight(domain.Highlight{ID: domain.ID{Provider: "fake", Local: "h"}, Bookmark: bm1, Text: "quote"})
+		e.settled(colA, "old", nil)
+		listed := b // Highlights stays nil: this listing didn't say.
+		if _, err := e.pipe.Process(ctx, WorkItem{Bookmark: bm1, Listed: &listed}, options(TriggerSync)); err != nil {
+			t.Fatal(err)
+		}
+		if c := e.provider.Calls(); c.Get != 0 || c.Highlights != 1 {
+			t.Errorf("calls = %+v", c)
+		}
+		st, _, _ := e.store.BookmarkStates().GetState(ctx, bm1)
+		want := InputHash(b, []domain.Highlight{{Text: "quote"}})
+		if st.InputHash != want {
+			t.Errorf("hash left out the highlight")
+		}
+	})
+
+	t.Run("highlights on a read spare the second request", func(t *testing.T) {
+		e := newEnv(t)
+		e.provider.SetListedHighlights(true)
+		e.provider.Add(inboxBookmark())
+		if _, err := e.pipe.Process(ctx, WorkItem{Bookmark: bm1}, options(TriggerWebhook)); err != nil {
+			t.Fatal(err)
+		}
+		if c := e.provider.Calls(); c.Highlights != 0 {
+			t.Errorf("calls = %+v", c)
+		}
+	})
+
+	t.Run("a write still re-reads, and a move since the listing stops it", func(t *testing.T) {
+		e := newEnv(t)
+		b := inboxBookmark()
+		e.provider.Add(b)
+		e.settled(pfake.Inbox, "", nil)
+		e.provider.SetCollection(bm1, colB) // After the listing, by the user.
+		out, err := e.pipe.Process(ctx, WorkItem{Bookmark: bm1, Listed: listedCopy(b)}, options(TriggerSync))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantStatus(t, out, Unchanged)
+		if c := e.provider.Calls(); c.Get != 1 {
+			t.Errorf("calls = %+v, want the step 8 read", c)
+		}
+		if w := e.provider.Writes(); len(w) != 0 {
+			t.Fatalf("writes = %+v", w)
+		}
+		st, _, _ := e.store.BookmarkStates().GetState(ctx, bm1)
+		if st.PinSource != domain.PinUser || st.KnownCollection != colB {
+			t.Errorf("state = %+v", st)
+		}
+	})
+
+	t.Run("a write adds to the tags read now, not the listed ones", func(t *testing.T) {
+		e := newEnv(t)
+		b := inboxBookmark()
+		e.provider.Add(b)
+		listed := listedCopy(b)
+		now := inboxBookmark()
+		now.Tags = []string{"Mine", "t2", "t3", "t4"} // Added by hand since the listing.
+		e.provider.Add(now)
+		e.settled(pfake.Inbox, "", nil)
+		if _, err := e.pipe.Process(ctx, WorkItem{Bookmark: bm1, Listed: listed}, options(TriggerSync)); err != nil {
+			t.Fatal(err)
+		}
+		w := e.provider.Writes()
+		if len(w) != 1 || w[0].Patch.SetTags != nil || !slices.Equal(w[0].Patch.AddTags, []string{"go"}) {
+			t.Fatalf("writes = %+v", w)
+		}
+		got, _ := e.provider.Bookmark(bm1)
+		if !slices.Equal(got.Tags, []string{"Mine", "t2", "t3", "t4", "go"}) {
+			t.Errorf("tags = %q", got.Tags)
+		}
+	})
+
+	t.Run("a listing older than our own write isn't a manual move", func(t *testing.T) {
+		e := newEnv(t)
+		b := inboxBookmark()
+		e.provider.Add(b)
+		listed := listedCopy(b)
+		// A webhook item filed it after the page was listed.
+		e.provider.SetCollection(bm1, colA)
+		e.settled(colA, InputHash(b, nil), nil)
+		if _, err := e.pipe.Process(ctx, WorkItem{Bookmark: bm1, Listed: listed}, options(TriggerSync)); err != nil {
+			t.Fatal(err)
+		}
+		st, _, _ := e.store.BookmarkStates().GetState(ctx, bm1)
+		if st.PinSource != domain.PinNone || st.KnownCollection != colA {
+			t.Errorf("false pin from a stale listing: %+v", st)
+		}
+		if c := e.provider.Calls(); c.Get != 1 {
+			t.Errorf("calls = %+v", c)
+		}
+	})
+
+	t.Run("a pending write is settled from a fresh read", func(t *testing.T) {
+		e := newEnv(t)
+		b := inboxBookmark()
+		e.provider.Add(b)
+		listed := listedCopy(b)
+		e.provider.SetCollection(bm1, colA) // The write landed after the listing.
+		target := colA
+		e.settled(pfake.Inbox, "", &target)
+		if _, err := e.pipe.Process(ctx, WorkItem{Bookmark: bm1, Listed: listed}, options(TriggerSync)); err != nil {
+			t.Fatal(err)
+		}
+		st, _, _ := e.store.BookmarkStates().GetState(ctx, bm1)
+		if st.PinSource != domain.PinNone || st.KnownCollection != colA || st.PendingCollection != nil {
+			t.Errorf("state = %+v", st)
+		}
+		if w := e.provider.Writes(); len(w) != 0 {
+			t.Errorf("wrote again: %+v", w)
+		}
+	})
+
+	t.Run("a real move shows up, once a fresh read confirms it", func(t *testing.T) {
+		e := newEnv(t)
+		b := inboxBookmark()
+		b.Collection = colB
+		e.provider.Add(b)
+		e.settled(colA, InputHash(b, nil), nil)
+		if _, err := e.pipe.Process(ctx, WorkItem{Bookmark: bm1, Listed: listedCopy(b)}, options(TriggerSync)); err != nil {
+			t.Fatal(err)
+		}
+		st, _, _ := e.store.BookmarkStates().GetState(ctx, bm1)
+		if st.PinSource != domain.PinUser || st.KnownCollection != colB {
+			t.Errorf("state = %+v", st)
+		}
+	})
+
+	t.Run("a dry run writes nothing", func(t *testing.T) {
+		e := newEnv(t)
+		b := inboxBookmark()
+		e.provider.Add(b)
+		opts := options(TriggerSync)
+		opts.DryRun = true
+		if _, err := e.pipe.Process(ctx, WorkItem{Bookmark: bm1, Listed: listedCopy(b)}, opts); err != nil {
+			t.Fatal(err)
+		}
+		if w := e.provider.Writes(); len(w) != 0 {
+			t.Errorf("writes = %+v", w)
+		}
+	})
+}

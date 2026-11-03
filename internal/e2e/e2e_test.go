@@ -1167,3 +1167,30 @@ func TestClassifierWithoutProposeTagsWritesVocabularyTags(t *testing.T) {
 	e.wantIn(id, colOld)
 	e.wantNoSetTags()
 }
+
+// An idle sync must be cheap enough for a 30-minute cadence: about N/50 listings
+// and no per-bookmark requests, whatever the library's size.
+func TestIdleSyncRequestCount(t *testing.T) {
+	const bookmarks = 275
+	e := newEnv(t, true)
+	e.p.SetListedHighlights(true)
+	e.addCollections(inbox, colOld, colTec, colFoo, colRev)
+	for i := range bookmarks {
+		e.add(fmt.Sprintf("b%d", i), "tech: one of many", colOld, []string{"mine"})
+	}
+	e.run(`{"type":"sync"}`) // The baseline.
+
+	before, calls := e.p.Calls(), e.c.total()
+	job := e.run(`{"type":"sync"}`)
+	after := e.p.Calls()
+
+	if got, want := after.List-before.List, bookmarks/50+1; got != want {
+		t.Errorf("list calls = %d, want %d", got, want)
+	}
+	if after.Get != before.Get || after.Highlights != before.Highlights || after.HighlightFeed != before.HighlightFeed || after.Tags != before.Tags {
+		t.Errorf("per-item or extra reads: before %+v, after %+v", before, after)
+	}
+	if e.c.total() != calls || job.Progress.Failed != 0 {
+		t.Errorf("classifier calls %d, then %d; progress %+v", calls, e.c.total(), job.Progress)
+	}
+}

@@ -354,16 +354,7 @@ func (w *Worker) rememberTags(ctx context.Context, out pipeline.Outcome, vocab *
 	}
 	w.vocabMu.Lock()
 	defer w.vocabMu.Unlock()
-	states := w.d.Store.BookmarkStates()
-	name := w.d.Provider.Name()
-	terms, _, err := taxonomy.LoadVocab(ctx, states, name)
-	if err != nil {
-		return err
-	}
-	if err := taxonomy.SaveVocab(ctx, states, name, taxonomy.AddVocab(terms, added, w.d.TagVocabSize)); err != nil {
-		return fmt.Errorf("save tag vocabulary: %w", err)
-	}
-	return nil
+	return taxonomy.AppendVocab(ctx, w.d.Store.BookmarkStates(), w.d.Provider.Name(), added, w.d.TagVocabSize)
 }
 
 func (w *Worker) process(ctx context.Context, item pipeline.WorkItem, tagsOnly bool) error {

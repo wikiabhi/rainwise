@@ -40,6 +40,13 @@ type Provider struct {
 	failures    []error
 	onGet       func(domain.ID)
 	nextCol     int
+	listed      bool
+	calls       Calls
+}
+
+// Calls counts the provider's read requests, failed ones too.
+type Calls struct {
+	Get, List, Highlights, HighlightFeed, Tags int
 }
 
 // New returns an empty provider with highlights, collection creation and tag
@@ -62,6 +69,35 @@ func (p *Provider) SetCapabilities(c ports.ProviderCapabilities) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.caps = c
+}
+
+// SetListedHighlights makes reads carry each bookmark's highlights, as a provider
+// whose listings include them does.
+func (p *Provider) SetListedHighlights(on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.listed = on
+}
+
+// Calls returns how many read requests have been made.
+func (p *Provider) Calls() Calls {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// read returns a copy of b as a read reports it. The caller holds p.mu.
+func (p *Provider) read(b domain.Bookmark) domain.Bookmark {
+	b = cloneBookmark(b)
+	if p.listed {
+		b.Highlights = []domain.Highlight{}
+		for _, h := range p.highlights {
+			if h.Bookmark == b.ID {
+				b.Highlights = append(b.Highlights, h)
+			}
+		}
+	}
+	return b
 }
 
 // Add stores or replaces a bookmark.
@@ -163,6 +199,7 @@ func (p *Provider) GetBookmark(_ context.Context, id domain.ID) (domain.Bookmark
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.calls.Get++
 	if err := p.takeFailure(); err != nil {
 		return domain.Bookmark{}, err
 	}
@@ -170,12 +207,13 @@ func (p *Provider) GetBookmark(_ context.Context, id domain.ID) (domain.Bookmark
 	if !ok {
 		return domain.Bookmark{}, fmt.Errorf("bookmark %s: %w", id, domain.ErrNotFound)
 	}
-	return cloneBookmark(b), nil
+	return p.read(b), nil
 }
 
 func (p *Provider) ListBookmarks(_ context.Context, q ports.ListQuery) (domain.Page[domain.Bookmark], error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.calls.List++
 	if err := p.takeFailure(); err != nil {
 		return domain.Page[domain.Bookmark]{}, err
 	}
@@ -188,7 +226,7 @@ func (p *Provider) ListBookmarks(_ context.Context, q ports.ListQuery) (domain.P
 		if q.Since != nil && p.caps.IncrementalSince && b.UpdatedAt.Before(*q.Since) {
 			continue
 		}
-		all = append(all, cloneBookmark(b))
+		all = append(all, p.read(b))
 	}
 	return paginate(all, q)
 }
@@ -228,6 +266,7 @@ func (p *Provider) ListHighlights(_ context.Context, bookmark domain.ID) ([]doma
 	if !p.caps.Highlights {
 		return nil, domain.ErrCapabilityUnsupported
 	}
+	p.calls.Highlights++
 	if err := p.takeFailure(); err != nil {
 		return nil, err
 	}
@@ -246,6 +285,7 @@ func (p *Provider) ListAllHighlights(_ context.Context, q ports.ListQuery) (doma
 	if !p.caps.Highlights {
 		return domain.Page[domain.Highlight]{}, domain.ErrCapabilityUnsupported
 	}
+	p.calls.HighlightFeed++
 	if err := p.takeFailure(); err != nil {
 		return domain.Page[domain.Highlight]{}, err
 	}
@@ -304,6 +344,7 @@ func (p *Provider) ListTags(_ context.Context) ([]domain.TagCount, error) {
 	if !p.caps.TagListing {
 		return nil, domain.ErrCapabilityUnsupported
 	}
+	p.calls.Tags++
 	if err := p.takeFailure(); err != nil {
 		return nil, err
 	}
@@ -362,6 +403,7 @@ func mergeTags(existing, add []string) []string {
 
 func cloneBookmark(b domain.Bookmark) domain.Bookmark {
 	b.Tags = slices.Clone(b.Tags)
+	b.Highlights = slices.Clone(b.Highlights)
 	if b.Metadata != nil {
 		m := make(map[string]string, len(b.Metadata))
 		for k, v := range b.Metadata {

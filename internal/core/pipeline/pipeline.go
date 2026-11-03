@@ -49,10 +49,14 @@ type Deps struct {
 	MinChars             int
 }
 
-// WorkItem is one bookmark to process, or one of its highlights.
+// WorkItem is one bookmark to process, or one of its highlights. Listed, if set,
+// is the bookmark as a listing just reported it, which spares the read in step 1.
+// It may be out of date by then, so Process reads afresh when it disagrees with
+// the state, and step 8 always reads before a write.
 type WorkItem struct {
 	Bookmark       domain.ID
 	FocusHighlight *domain.ID
+	Listed         *domain.Bookmark
 }
 
 type Trigger string
@@ -189,20 +193,18 @@ func (p *Pipeline) Process(ctx context.Context, item WorkItem, opts Options) (Ou
 	}
 	r := &run{opts: opts, now: p.d.Now()}
 
-	// Step 1: read the bookmark and its highlights.
-	r.b, err = p.d.Provider.GetBookmark(ctx, item.Bookmark)
+	// Step 1: read the bookmark and its highlights. The state comes first, since
+	// it says whether a listed copy can stand in for the read.
+	r.state, r.known, err = p.d.Store.BookmarkStates().GetState(ctx, item.Bookmark)
+	if err != nil {
+		return Outcome{}, fmt.Errorf("load state of %s: %w", item.Bookmark, err)
+	}
+	r.b, r.highlights, err = p.read(ctx, item, r.state, r.known)
 	if errors.Is(err, domain.ErrNotFound) {
 		return p.markDeleted(ctx, item.Bookmark, r.now)
 	}
 	if err != nil {
-		return Outcome{}, fmt.Errorf("read bookmark %s: %w", item.Bookmark, err)
-	}
-	r.highlights, err = p.listHighlights(ctx, item.Bookmark)
-	if errors.Is(err, domain.ErrNotFound) {
-		return p.markDeleted(ctx, item.Bookmark, r.now)
-	}
-	if err != nil {
-		return Outcome{}, fmt.Errorf("read highlights of %s: %w", item.Bookmark, err)
+		return Outcome{}, err
 	}
 	r.hash = InputHash(r.b, r.highlights)
 	r.rec = domain.DecisionRecord{
@@ -217,11 +219,7 @@ func (p *Pipeline) Process(ctx context.Context, item WorkItem, opts Options) (Ou
 		return Outcome{}, err
 	}
 
-	// Step 2: load state and detect manual moves.
-	r.state, r.known, err = p.d.Store.BookmarkStates().GetState(ctx, item.Bookmark)
-	if err != nil {
-		return Outcome{}, fmt.Errorf("load state of %s: %w", item.Bookmark, err)
-	}
+	// Step 2: detect manual moves.
 	r.isNew = isNew(r.state, r.known)
 	dirty := !r.known
 	if !r.known {
@@ -294,6 +292,30 @@ func (p *Pipeline) Process(ctx context.Context, item WorkItem, opts Options) (Ou
 func pin(s *domain.BookmarkState, source domain.PinSource, now time.Time) {
 	s.PinSource = source
 	s.PinnedAt = &now
+}
+
+// read is step 1. A listed copy is used only if it agrees with what's recorded. A
+// listing can predate a write made since, by a webhook item or a restore, and read
+// as a manual move or as a write that never landed. So a disagreement, or a write
+// left pending, gets a fresh read to settle it.
+func (p *Pipeline) read(ctx context.Context, item WorkItem, st domain.BookmarkState, known bool) (domain.Bookmark, []domain.Highlight, error) {
+	var b domain.Bookmark
+	if l := item.Listed; l != nil && (!known || (l.Collection == st.KnownCollection && st.PendingCollection == nil && len(st.PendingTags) == 0)) {
+		b = *l
+	} else {
+		var err error
+		if b, err = p.d.Provider.GetBookmark(ctx, item.Bookmark); err != nil {
+			return domain.Bookmark{}, nil, fmt.Errorf("read bookmark %s: %w", item.Bookmark, err)
+		}
+	}
+	if b.Highlights != nil {
+		return b, b.Highlights, nil
+	}
+	highlights, err := p.listHighlights(ctx, item.Bookmark)
+	if err != nil {
+		return domain.Bookmark{}, nil, fmt.Errorf("read highlights of %s: %w", item.Bookmark, err)
+	}
+	return b, highlights, nil
 }
 
 func (p *Pipeline) listHighlights(ctx context.Context, id domain.ID) ([]domain.Highlight, error) {

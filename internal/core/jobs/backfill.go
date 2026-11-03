@@ -109,6 +109,9 @@ func (d Deps) runBatch(ctx context.Context, job *domain.Job, rc RunContext, trig
 			itemOpts.Plan = plan
 		}
 		out, err := d.Pipeline.Process(ctx, item, itemOpts)
+		if err == nil {
+			err = d.rememberTags(ctx, job, out, opts.Vocab)
+		}
 		logFailure(ctx, job, item, err)
 		return out, err
 	}

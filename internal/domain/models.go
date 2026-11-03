@@ -13,6 +13,9 @@ type Bookmark struct {
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 	Metadata    map[string]string `json:"metadata,omitempty"` // opaque to core
+	// Highlights is set when the read that returned this bookmark included them.
+	// Empty means it has none; nil means the read didn't say.
+	Highlights []Highlight `json:"highlights,omitempty"`
 }
 
 type Highlight struct {

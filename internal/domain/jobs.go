@@ -60,6 +60,9 @@ type Checkpoint struct {
 	PageToken string     `json:"page_token,omitempty"`
 	PinCutoff *time.Time `json:"pin_cutoff,omitempty"`
 	Pauses    int        `json:"pauses,omitempty"`
+	// HighlightFeed is set by a sync that listed a bookmark without saying what
+	// highlights it has, so the listing can't stand in for the highlight feed.
+	HighlightFeed bool `json:"highlight_feed,omitempty"`
 }
 
 type Job struct {
