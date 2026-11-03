@@ -39,6 +39,11 @@ type Scope struct {
 	IDs         []string `json:"ids,omitempty"`
 }
 
+// IsEmpty reports a scope covering the whole library.
+func (s Scope) IsEmpty() bool {
+	return len(s.Collections)+len(s.Tags)+len(s.IDs) == 0
+}
+
 type JobProgress struct {
 	Total       int `json:"total"`
 	Processed   int `json:"processed"`
@@ -49,6 +54,9 @@ type JobProgress struct {
 }
 
 type Checkpoint struct {
+	// Phase is how far a multi-pass job has got. PageToken belongs to the phase's
+	// listing, so an empty token is only "the start" of that phase.
+	Phase     string     `json:"phase,omitempty"`
 	PageToken string     `json:"page_token,omitempty"`
 	PinCutoff *time.Time `json:"pin_cutoff,omitempty"`
 	Pauses    int        `json:"pauses,omitempty"`

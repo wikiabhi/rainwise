@@ -515,6 +515,37 @@ func Run(t *testing.T, newStore func(t *testing.T) ports.Store) {
 		}
 	})
 
+	t.Run("RecordProposal", func(t *testing.T) {
+		ts := newStore(t).Taxonomies()
+		if err := ts.RecordProposal(ctx, "tx", domain.CollectionProposal{Name: "New"}); !errors.Is(err, domain.ErrNotFound) {
+			t.Errorf("unknown taxonomy = %v, want ErrNotFound", err)
+		}
+		_, err := ts.SeedTaxonomy(ctx, domain.Taxonomy{ID: "tx", Status: domain.TaxonomyActive, Proposals: []domain.CollectionProposal{{Name: "Old", Count: 2}}})
+		must(t, err)
+		before, _ := ts.GetTaxonomy(ctx, "tx")
+		must(t, ts.RecordProposal(ctx, "tx", domain.CollectionProposal{Name: "New", Description: "d", Count: 1}))
+		must(t, ts.RecordProposal(ctx, "tx", domain.CollectionProposal{Name: "new", Count: 1}))
+		must(t, ts.RecordProposal(ctx, "tx", domain.CollectionProposal{Name: "Old"}))
+		got, err := ts.GetTaxonomy(ctx, "tx")
+		must(t, err)
+		if got.Version != before.Version {
+			t.Errorf("version moved from %d to %d", before.Version, got.Version)
+		}
+		want := []domain.CollectionProposal{{Name: "Old", Count: 3}, {Name: "New", Description: "d", Count: 2}}
+		if !reflect.DeepEqual(got.Proposals, want) {
+			t.Errorf("proposals = %+v, want %+v", got.Proposals, want)
+		}
+		put, err := ts.PutTaxonomy(ctx, got, nil)
+		must(t, err)
+		if put.Version != before.Version+1 {
+			t.Errorf("version after put = %d", put.Version)
+		}
+		again, _ := ts.GetTaxonomy(ctx, "tx")
+		if !reflect.DeepEqual(again.Proposals, want) {
+			t.Errorf("proposals after put = %+v", again.Proposals)
+		}
+	})
+
 	t.Run("NotFoundErrors", func(t *testing.T) {
 		s := newStore(t)
 		checks := map[string]error{}

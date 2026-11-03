@@ -134,9 +134,12 @@ func (l *itemLoop) abort(ctx context.Context, cause error) error {
 	return errors.Join(cause, l.rc.Checkpoint(ctx))
 }
 
-func (l *itemLoop) stopErr(ctx context.Context) error {
+func (l *itemLoop) stopErr(ctx context.Context) error { return stopErr(ctx, l.rc) }
+
+// stopErr says why the job should stop now, or nil if it needn't.
+func stopErr(ctx context.Context, rc RunContext) error {
 	select {
-	case <-l.rc.Stopping:
+	case <-rc.Stopping:
 		return ErrInterrupted
 	default:
 		return ctx.Err()
@@ -222,19 +225,23 @@ func (l *itemLoop) pauseIfFailing(ctx context.Context) error {
 	return nil
 }
 
-// sleep waits out a pause, ending early when the job is told to stop.
 func (l *itemLoop) sleep(ctx context.Context) error {
+	return sleepUnlessStopped(ctx, l.rc, l.cfg.Sleep, l.cfg.PauseFor)
+}
+
+// sleepUnlessStopped waits, ending early when the job is told to stop.
+func sleepUnlessStopped(ctx context.Context, rc RunContext, sleep func(context.Context, time.Duration) error, d time.Duration) error {
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
 		select {
-		case <-l.rc.Stopping:
+		case <-rc.Stopping:
 			cancel()
 		case <-sctx.Done():
 		}
 	}()
-	err := l.cfg.Sleep(sctx, l.cfg.PauseFor)
-	if stop := l.stopErr(ctx); stop != nil {
+	err := sleep(sctx, d)
+	if stop := stopErr(ctx, rc); stop != nil {
 		return stop
 	}
 	return err

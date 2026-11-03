@@ -92,3 +92,21 @@ func (s taxoStore) SeedTaxonomy(ctx context.Context, t domain.Taxonomy) (bool, e
 	n, err := res.RowsAffected()
 	return n > 0, err
 }
+
+func (s taxoStore) RecordProposal(ctx context.Context, id string, p domain.CollectionProposal) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	t, err := loadTaxonomy(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	t.Proposals = domain.MergeProposal(t.Proposals, p)
+	if _, err := tx.ExecContext(ctx, `UPDATE taxonomies SET body = ?, proposals = ? WHERE id = ?`,
+		toJSON(t), toJSON(t.Proposals), id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

@@ -122,7 +122,7 @@ func (s *Service) validate(ctx context.Context, req CreateRequest) error {
 	if !slices.Contains(s.d.ProviderNames, req.Provider) {
 		return fmt.Errorf("unknown provider %q: %w", req.Provider, domain.ErrValidation)
 	}
-	if req.Type == domain.JobReclassify && len(req.Scope.Collections)+len(req.Scope.Tags)+len(req.Scope.IDs) == 0 {
+	if req.Type == domain.JobReclassify && req.Scope.IsEmpty() {
 		return fmt.Errorf("reclassify needs a scope: %w", domain.ErrValidation)
 	}
 	// Snapshots and restores don't classify, and §11 posts restores without a

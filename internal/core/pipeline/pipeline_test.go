@@ -82,6 +82,9 @@ func newEnv(t *testing.T) *env {
 	if err := e.store.Jobs().CreateJob(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := e.store.Taxonomies().SeedTaxonomy(context.Background(), testTaxonomy()); err != nil {
+		t.Fatal(err)
+	}
 	return e
 }
 
@@ -1458,6 +1461,130 @@ func TestProposalWithoutAutoCreateGoesToReview(t *testing.T) {
 	}
 	if out.Record.Decision.Collection.ProposedName != "New Home" {
 		t.Errorf("record = %+v", out.Record.Decision.Collection)
+	}
+}
+
+func (e *env) recordedProposals() []domain.CollectionProposal {
+	e.t.Helper()
+	tx, err := e.store.Taxonomies().GetTaxonomy(context.Background(), "tx")
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return tx.Proposals
+}
+
+func wantProposal(t *testing.T, got []domain.CollectionProposal, name string, count int) {
+	t.Helper()
+	if len(got) != 1 || got[0].Name != name || got[0].Count != count {
+		t.Errorf("proposals = %+v, want %s x%d", got, name, count)
+	}
+}
+
+func TestDeclinedProposalIsRecorded(t *testing.T) {
+	e := newEnv(t)
+	e.cls.Script(proposal("New Home", 0.9))
+	e.provider.Add(inboxBookmark())
+	o := dynamicOptions()
+	o.Taxonomy.Dynamic.AutoCreate = false
+	e.process(o)
+	wantProposal(t, e.recordedProposals(), "New Home", 1)
+
+	// Same name from a second bookmark, and the version doesn't move.
+	b2 := inboxBookmark()
+	b2.ID = domain.ID{Provider: "fake", Local: "2"}
+	e.provider.Add(b2)
+	if _, err := e.pipe.Process(context.Background(), WorkItem{Bookmark: b2.ID}, o); err != nil {
+		t.Fatal(err)
+	}
+	wantProposal(t, e.recordedProposals(), "New Home", 2)
+	tx, _ := e.store.Taxonomies().GetTaxonomy(context.Background(), "tx")
+	if tx.Version != testTaxonomy().Version {
+		t.Errorf("version = %d", tx.Version)
+	}
+}
+
+func TestDeclinedProposalAlreadyInReviewIsRecorded(t *testing.T) {
+	e := newEnv(t)
+	e.cls.Script(proposal("New Home", 0.9))
+	b := inboxBookmark()
+	b.Collection = review
+	e.provider.Add(b)
+	o := dynamicOptions()
+	o.Trigger = TriggerBackfill
+	o.Taxonomy.Dynamic.AutoCreate = false
+	e.process(o)
+	wantProposal(t, e.recordedProposals(), "New Home", 1)
+}
+
+func TestDryRunDoesNotRecordProposal(t *testing.T) {
+	e := newEnv(t)
+	e.cls.Script(proposal("New Home", 0.9))
+	e.provider.Add(inboxBookmark())
+	o := dynamicOptions()
+	o.Taxonomy.Dynamic.AutoCreate = false
+	o.DryRun = true
+	e.process(o)
+	if got := e.recordedProposals(); len(got) != 0 {
+		t.Errorf("proposals = %+v", got)
+	}
+}
+
+func TestPlanApplyRecordsDeclinedProposal(t *testing.T) {
+	e := newEnv(t)
+	e.cls.Script(proposal("New Home", 0.9))
+	e.provider.Add(inboxBookmark())
+	o := dynamicOptions()
+	o.Trigger = TriggerBackfill
+	o.Taxonomy.Dynamic.AutoCreate = false
+	o.DryRun = true
+	rec := e.process(o).Record
+
+	o.DryRun = false
+	o.Plan = &rec
+	calls := e.cls.Calls()
+	e.process(o)
+	if e.cls.Calls() != calls {
+		t.Errorf("classified again")
+	}
+	if e.bookmark().Collection != review {
+		t.Errorf("collection = %v", e.bookmark().Collection)
+	}
+	wantProposal(t, e.recordedProposals(), "New Home", 1)
+}
+
+func TestAutoCreateCapAtWriteTimeRecordsProposal(t *testing.T) {
+	e := newEnv(t)
+	e.cls.Script(proposal("New Home", 0.9))
+	e.provider.Add(inboxBookmark())
+	o := dynamicOptions()
+	// Another item takes the last slot after this one passes validation.
+	e.cls.OnClassify(func(ports.ClassifyRequest) {
+		if err := e.store.BookmarkStates().PutSetting(context.Background(), createdSettingPrefix+"fake:tx",
+			`[{"key":"other","name":"Other","id":{"provider":"fake","local":"other"}}]`); err != nil {
+			t.Error(err)
+		}
+	})
+	wantStatus(t, e.process(o), NeedsReview)
+	wantProposal(t, e.recordedProposals(), "New Home", 1)
+}
+
+func TestDryRunMarksNewTagsOnEveryUse(t *testing.T) {
+	e := newEnv(t)
+	e.provider.Add(inboxBookmark())
+	b2 := inboxBookmark()
+	b2.ID = domain.ID{Provider: "fake", Local: "2"}
+	e.provider.Add(b2)
+	o := options(TriggerBackfill)
+	o.DryRun = true
+	first := e.process(o).Record
+	second, err := e.pipe.Process(context.Background(), WorkItem{Bookmark: b2.ID}, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range []domain.DecisionRecord{first, second.Record} {
+		if !slices.Equal(rec.NewTags, []string{"brand-new"}) {
+			t.Errorf("new tags = %v (add %v)", rec.NewTags, rec.AddTags)
+		}
 	}
 }
 

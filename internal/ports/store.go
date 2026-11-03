@@ -63,4 +63,7 @@ type TaxonomyStore interface {
 	// PutTaxonomy bumps Version; returns ErrConflict if ifVersion mismatches.
 	PutTaxonomy(ctx context.Context, t domain.Taxonomy, ifVersion *int) (domain.Taxonomy, error)
 	SeedTaxonomy(ctx context.Context, t domain.Taxonomy) (seeded bool, err error)
+	// RecordProposal notes a collection the classifier suggested. It doesn't bump
+	// Version, and a same-named proposal increments Count.
+	RecordProposal(ctx context.Context, id string, p domain.CollectionProposal) error
 }

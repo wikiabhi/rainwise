@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type PinSource string
 
@@ -61,6 +64,7 @@ type DecisionRecord struct {
 	ObservedTags       []string   `json:"observed_tags"`
 	TargetCollection   *ID        `json:"target_collection,omitempty"`
 	AddTags            []string   `json:"add_tags"`
+	NewTags            []string   `json:"new_tags,omitempty"` // Dry runs: the AddTags outside the existing vocabulary.
 	Decision           Decision   `json:"decision"`
 	Reason             string     `json:"reason"`
 	Result             string     `json:"result"`
@@ -94,6 +98,22 @@ type CollectionProposal struct {
 	Name        string `json:"name" yaml:"name"`
 	Description string `json:"description" yaml:"description"`
 	Count       int    `json:"count" yaml:"count"`
+}
+
+// MergeProposal adds p to list. A proposal already there by name, ignoring case,
+// gains its count, and every proposal counts at least once.
+func MergeProposal(list []CollectionProposal, p CollectionProposal) []CollectionProposal {
+	p.Count = max(p.Count, 1)
+	for i := range list {
+		if strings.EqualFold(strings.TrimSpace(list[i].Name), strings.TrimSpace(p.Name)) {
+			list[i].Count += p.Count
+			if list[i].Description == "" {
+				list[i].Description = p.Description
+			}
+			return list
+		}
+	}
+	return append(list, p)
 }
 
 // Taxonomy modes and statuses.

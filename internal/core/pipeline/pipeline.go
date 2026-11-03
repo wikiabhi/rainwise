@@ -495,6 +495,11 @@ func (p *Pipeline) fromPlan(r *run, want bool) (Validated, domain.Decision) {
 		target := *plan.TargetCollection
 		if review, ok := reviewCollection(r.tax, r.resolved); ok && target == review {
 			v.ToReview = true
+			// The dry run recorded nothing, so a declined proposal is recorded now.
+			name := strings.TrimSpace(plan.Decision.Collection.ProposedName)
+			if _, known := findCollection(r.tax, name); name != "" && !known {
+				v.ProposedCollection = &domain.CollectionProposal{Name: name, Count: 1}
+			}
 		} else {
 			v.Target = &target
 		}
@@ -723,6 +728,7 @@ func (p *Pipeline) apply(ctx context.Context, r *run, v Validated) (Outcome, err
 			r.rec.Reason = joinReasons(r.rec.Reason, fmt.Sprintf("would create collection %q", proposal.Name))
 		}
 		r.rec.Result = resultProposed
+		r.rec.NewTags = newTags(tags, r.opts.Vocab)
 		r.state.KnownCollection = r.b.Collection
 		r.state.KnownTags = r.b.Tags
 		if err := p.saveDecision(ctx, r.rec); err != nil {
@@ -732,6 +738,12 @@ func (p *Pipeline) apply(ctx context.Context, r *run, v Validated) (Outcome, err
 			return Outcome{}, err
 		}
 		return Outcome{Status: status, Record: r.rec}, nil
+	}
+
+	if v.ToReview && v.ProposedCollection != nil {
+		if err := p.recordProposal(ctx, r, *v.ProposedCollection); err != nil {
+			return Outcome{}, err
+		}
 	}
 
 	if target == nil && len(tags) == 0 && proposal == nil {
@@ -763,6 +775,9 @@ func (p *Pipeline) apply(ctx context.Context, r *run, v Validated) (Outcome, err
 		} else {
 			r.rec.Reason = joinReasons(r.rec.Reason, reason)
 			needsReview = true
+			if err := p.recordProposal(ctx, r, *proposal); err != nil {
+				return Outcome{}, err
+			}
 			if review, ok := reviewCollection(r.tax, r.resolved); ok {
 				target = &review
 			}
@@ -800,6 +815,29 @@ func (p *Pipeline) apply(ctx context.Context, r *run, v Validated) (Outcome, err
 
 	// Step 10: record the result.
 	return p.complete(ctx, r, updated, status, model, target != nil, true)
+}
+
+// newTags lists the tags outside the vocabulary the run started with, on every
+// use, unlike Validated.NewTags, which lists a tag only where it was first seen.
+func newTags(tags []string, vocab *taxonomy.RunVocab) []string {
+	if vocab == nil {
+		return nil
+	}
+	var out []string
+	for _, t := range tags {
+		if _, ok := vocab.Existing(t); !ok {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// recordProposal keeps a collection name that wasn't created, for /proposals.
+func (p *Pipeline) recordProposal(ctx context.Context, r *run, c domain.CollectionProposal) error {
+	if err := p.d.Store.Taxonomies().RecordProposal(ctx, r.opts.Taxonomy.ID, c); err != nil {
+		return fmt.Errorf("record proposal %q: %w", c.Name, err)
+	}
+	return nil
 }
 
 // handleWriteNotFound settles a write the provider refused as not found, which

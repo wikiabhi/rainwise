@@ -517,3 +517,16 @@ func (s *taxoStore) SeedTaxonomy(_ context.Context, t domain.Taxonomy) (bool, er
 	s.taxos[t.ID] = clone(t)
 	return true, nil
 }
+
+func (s *taxoStore) RecordProposal(_ context.Context, id string, p domain.CollectionProposal) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.taxos[id]
+	if !ok {
+		return notFound("taxonomy", id)
+	}
+	t = clone(t)
+	t.Proposals = domain.MergeProposal(t.Proposals, p)
+	s.taxos[id] = t
+	return nil
+}
