@@ -551,7 +551,7 @@ Every pin has a source: `baseline`, or `user` for a detected manual move or a ne
 
 - **First backfill:** the user said it may move anything, and that manual moves become final after it. So it ignores every pin created before its cutoff. The cutoff is the job's start, or the dry run's start when using `from_dry_run`, so corrections made after a dry run are honored. Moves made during the job are honored too.
 - **Later backfills and reclassify:** respect `user` pins and ignore `baseline` pins. `include_pinned` overrides this for reclassify.
-- **Tracking:** `settings` stores when the first real backfill for a provider finished. A restore to a snapshot taken before that clears it, so the next backfill is a first backfill again.
+- **Tracking:** `settings` stores when the first real backfill for a provider finished. Whole-library snapshots record this value, and restoring one puts it back, so a restore to a snapshot taken before that makes the next backfill a first backfill again, and undoing that restore reverses it. Restoring a scoped snapshot leaves it alone.
 
 ### 9.2 Webhook
 
