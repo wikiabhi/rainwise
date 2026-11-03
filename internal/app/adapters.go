@@ -104,26 +104,50 @@ func buildAdapters(cfg *config.Config, deps BuildDeps) (*adapters, error) {
 	return a, nil
 }
 
-// checkTaxonomies applies §6.4's startup rules.
+// checkTaxonomies applies §6.4's startup rules to each taxonomy.
 func checkTaxonomies(cfg *config.Config, a *adapters, taxonomies []domain.Taxonomy) error {
 	var errs []error
-	add := func(format string, args ...any) { errs = append(errs, fmt.Errorf("config: "+format, args...)) }
-	tooMany := func(t domain.Taxonomy, role, name string, c ports.Classifier) {
-		if most := c.Capabilities().MaxChoices; most > 0 && len(t.Collections) > most {
-			add("taxonomies.%s has %d collections, more than the %d that roles.%s %q can choose from", t.ID, len(t.Collections), most, role, name)
+	for _, t := range taxonomies {
+		if err := checkTaxonomy(cfg, a, t); err != nil {
+			errs = append(errs, fmt.Errorf("config: %w", err))
 		}
 	}
-	for _, t := range taxonomies {
-		if t.Mode == domain.ModeDynamic && a.proposer == nil {
-			add("roles.proposer %q can't propose taxonomies, and taxonomies.%s is dynamic", cfg.Roles.Proposer, t.ID)
+	return errors.Join(errs...)
+}
+
+// checkTaxonomy is §6.4's rules for one taxonomy. A taxonomy that passes can't stop
+// a later start, including by growing: a dynamic one's collections stay within its
+// max_collections, so that has to fit the classifiers as well.
+func checkTaxonomy(cfg *config.Config, a *adapters, t domain.Taxonomy) error {
+	var errs []error
+	add := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
+	tooMany := func(role, name string, c ports.Classifier) {
+		most := c.Capabilities().MaxChoices
+		if most <= 0 {
+			return
 		}
-		if t.Dynamic.AutoCreate && !a.classifier.Capabilities().ProposeCollections {
-			add("roles.classifier %q can't propose collections, and taxonomies.%s has dynamic.auto_create on", cfg.Roles.Classifier, t.ID)
+		if len(t.Collections) > most {
+			add("taxonomies.%s has %d collections, more than the %d that roles.%s %q can choose from", t.ID, len(t.Collections), most, role, name)
 		}
-		tooMany(t, "classifier", cfg.Roles.Classifier, a.classifier)
-		if a.fallback != nil {
-			tooMany(t, "fallback", *cfg.Roles.Fallback, a.fallback)
+		if t.Mode != domain.ModeDynamic {
+			return
 		}
+		switch limit := t.Dynamic.MaxCollections; {
+		case limit <= 0:
+			add("taxonomies.%s sets no dynamic.max_collections, and roles.%s %q can choose from at most %d", t.ID, role, name, most)
+		case limit > most:
+			add("taxonomies.%s has dynamic.max_collections %d, more than the %d that roles.%s %q can choose from", t.ID, limit, most, role, name)
+		}
+	}
+	if t.Mode == domain.ModeDynamic && a.proposer == nil {
+		add("roles.proposer %q can't propose taxonomies, and taxonomies.%s is dynamic", cfg.Roles.Proposer, t.ID)
+	}
+	if t.Dynamic.AutoCreate && !a.classifier.Capabilities().ProposeCollections {
+		add("roles.classifier %q can't propose collections, and taxonomies.%s has dynamic.auto_create on", cfg.Roles.Classifier, t.ID)
+	}
+	tooMany("classifier", cfg.Roles.Classifier, a.classifier)
+	if a.fallback != nil {
+		tooMany("fallback", *cfg.Roles.Fallback, a.fallback)
 	}
 	return errors.Join(errs...)
 }

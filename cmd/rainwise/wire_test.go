@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 
 	cfake "github.com/wikiabhi/rainwise/internal/adapters/classifier/fake"
 	pfake "github.com/wikiabhi/rainwise/internal/adapters/provider/fake"
+	"github.com/wikiabhi/rainwise/internal/adapters/store/sqlite"
 	"github.com/wikiabhi/rainwise/internal/config"
 	"github.com/wikiabhi/rainwise/internal/domain"
 )
@@ -133,6 +135,12 @@ func TestBuildRejects(t *testing.T) {
 		{"unknown content_fetch", func(c *config.Config) {
 			c.Processing.ContentFetch = "sometimes"
 		}, []string{"processing.content_fetch", `"sometimes"`}},
+		{"dynamic max_collections above what Jev can choose from", func(c *config.Config) {
+			tx := dynamic("auto", false)
+			tx.Dynamic.MaxCollections = 256
+			c.Taxonomies["auto"] = tx
+			c.Roles.Classifier = "jev"
+		}, []string{"roles.classifier", `"jev"`, "taxonomies.auto", "max_collections", "256", "255"}},
 		{"provider named apart from its adapter", func(c *config.Config) {
 			c.Providers["mine"] = c.Providers["raindrop"]
 			c.Processing.Provider = "mine"
@@ -514,6 +522,43 @@ func TestServeStopsOnSignal(t *testing.T) {
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "secret-value") {
 		t.Fatal("a secret reached the output")
+	}
+}
+
+// A port that's taken must stop serve before it touches any job.
+func TestServeListensBeforeRecoveringJobs(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	env := testEnv(t)
+	ctx := context.Background()
+	store, err := sqlite.Open(ctx, env("DB"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	// Running this one would fail it without any call to the provider.
+	job := domain.Job{ID: "job_q", Type: domain.JobRestore, Status: domain.JobQueued, Provider: "raindrop",
+		Params: domain.JobParams{SnapshotID: "no-such-snapshot"}, CreatedAt: time.Now()}
+	if err := store.Jobs().CreateJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+
+	y := strings.Replace(baseYAML, `"127.0.0.1:0"`, `"`+taken.Addr().String()+`"`, 1)
+	code, _, stderr := cli(t, env, "serve", "--config", writeConfig(t, y))
+	if code != 1 || stderr == "" {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	got, err := store.Jobs().GetJob(ctx, "job_q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.JobQueued {
+		t.Fatalf("job = %s, want it untouched", got.Status)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -145,6 +146,9 @@ type env struct {
 	store    *sqlite.Store
 	db       *sql.DB
 	nextHook int
+	// classifierOverride and stopWait apply from the next boot.
+	classifierOverride ports.Classifier
+	stopWait           time.Duration
 }
 
 func newEnv(t *testing.T, automation bool) *env {
@@ -180,7 +184,11 @@ func (e *env) boot() {
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	a, err := app.Build(cfg, app.BuildDeps{Provider: e.p, Classifier: e.c, PollEvery: time.Millisecond})
+	var c ports.Classifier = e.c
+	if e.classifierOverride != nil {
+		c = e.classifierOverride
+	}
+	a, err := app.Build(cfg, app.BuildDeps{Provider: e.p, Classifier: c, PollEvery: time.Millisecond, StopWait: e.stopWait})
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -191,12 +199,18 @@ func (e *env) boot() {
 
 func (e *env) shutdown() {
 	e.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), testWait)
-	defer cancel()
-	if err := e.app.Shutdown(ctx); err != nil {
+	if err := e.stop(); err != nil {
 		e.t.Fatalf("Shutdown: %v", err)
 	}
+}
+
+// stop is shutdown for any goroutine: it leaves failing the test to the caller.
+func (e *env) stop() error {
+	ctx, cancel := context.WithTimeout(context.Background(), testWait)
+	defer cancel()
+	err := e.app.Shutdown(ctx)
 	e.stopApp()
+	return err
 }
 
 func (e *env) do(method, path, body string, hdr ...string) (int, []byte) {
@@ -782,11 +796,14 @@ func TestKillAndResume(t *testing.T) {
 				e.stopApp()
 				e.shutdown()
 			} else {
-				stopped := make(chan struct{})
-				go func() { defer close(stopped); e.shutdown() }()
+				stopped := make(chan error, 1)
+				go func() { stopped <- e.stop() }()
 				close(release)
 				select {
-				case <-stopped:
+				case err := <-stopped:
+					if err != nil {
+						t.Fatalf("Shutdown: %v", err)
+					}
 				case <-time.After(testWait):
 					t.Fatal("Shutdown never returned")
 				}
@@ -841,6 +858,163 @@ func TestKillAndResume(t *testing.T) {
 			}
 		})
 	}
+}
+
+// One in-flight call blocks a job for as long as hold says, then records its return.
+func (e *env) jobInFlight(hold func(context.Context)) (returned *atomic.Bool) {
+	e.t.Helper()
+	e.addCollections(inbox, colTec, colFoo, colRev)
+	id := e.add("b1", "tech: slow to classify", inbox, nil)
+	returned = &atomic.Bool{}
+	inFlight := make(chan struct{})
+	e.c.setBlock(func(ctx context.Context, _ domain.ID) error {
+		close(inFlight)
+		hold(ctx)
+		returned.Store(true)
+		return ctx.Err()
+	})
+	e.createJob(`{"type":"backfill"}`)
+	select {
+	case <-inFlight:
+	case <-time.After(testWait):
+		e.t.Fatalf("the job never classified %s", id)
+	}
+	return returned
+}
+
+// A drain that outlasts the wait for cancelled work is still a clean stop: that wait
+// only starts once something has been cancelled.
+func TestShutdownDrainLongerThanStopWait(t *testing.T) {
+	const wait = 500 * time.Millisecond
+	e := newEnv(t, false)
+	e.shutdown()
+	e.stopWait = wait
+	e.boot()
+	returned := e.jobInFlight(func(context.Context) { <-time.After(wait * 3 / 2) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), testWait)
+	defer cancel()
+	if err := e.app.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown after a clean drain: %v", err)
+	}
+	if !returned.Load() {
+		t.Fatal("Shutdown returned with the call in flight")
+	}
+	e.c.setBlock(nil)
+}
+
+// Work cancelled when the deadline runs out still gets the whole wait to unwind, or
+// the database closes under it, however long the deadline had been.
+func TestShutdownWaitsForCancelledWork(t *testing.T) {
+	const wait = 500 * time.Millisecond
+	e := newEnv(t, false)
+	e.shutdown()
+	e.stopWait = wait
+	e.boot()
+	returned := e.jobInFlight(func(ctx context.Context) {
+		<-ctx.Done()
+		<-time.After(wait / 2)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), wait*3/2)
+	defer cancel()
+	if err := e.app.Shutdown(ctx); err == nil {
+		t.Fatal("a missed deadline should be reported")
+	}
+	if !returned.Load() {
+		t.Fatal("the database closed while a cancelled handler was still unwinding")
+	}
+	e.stopApp()
+	e.c.setBlock(nil)
+	e.boot() // For the cleanup's clean stop, and the file must still be usable.
+}
+
+// proposing adds what roles.proposer needs to the test classifier.
+type proposing struct {
+	*classifier
+	caps ports.ClassifierCapabilities
+}
+
+func (p proposing) Capabilities() ports.ClassifierCapabilities { return p.caps }
+
+func (p proposing) ProposeTaxonomy(context.Context, ports.ProposeRequest) (ports.TaxonomyProposal, error) {
+	return ports.TaxonomyProposal{}, nil
+}
+
+func putBody(t *testing.T, tx domain.Taxonomy) string {
+	t.Helper()
+	b, err := json.Marshal(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func fixedTaxonomy(n int) domain.Taxonomy {
+	tx := domain.Taxonomy{Mode: domain.ModeFixed, Status: domain.TaxonomyActive, Rules: domain.TaxonomyRules{MaxTags: 5}}
+	for i := range n - 1 {
+		tx.Collections = append(tx.Collections, domain.TaxonomyCollection{Key: fmt.Sprintf("c%d", i), Name: fmt.Sprintf("C%d", i)})
+	}
+	tx.Collections = append(tx.Collections, domain.TaxonomyCollection{Key: "review", Name: "Needs Review", Role: "review"})
+	return tx
+}
+
+func dynamicTaxonomy(most int, autoCreate bool) domain.Taxonomy {
+	return domain.Taxonomy{Mode: domain.ModeDynamic, Status: domain.TaxonomyDraft, Rules: domain.TaxonomyRules{MaxTags: 5},
+		Dynamic: domain.DynamicSettings{MaxCollections: most, SampleSize: 10, AutoCreate: autoCreate}}
+}
+
+// A PUT must not store what would stop the next start (§6.4). Each answer is a 422
+// that stores nothing, and the service still starts afterwards.
+func TestPutTaxonomyKeepsStartupRules(t *testing.T) {
+	canPropose := ports.ClassifierCapabilities{FixedChoice: true, ProposeCollections: true, ProposeTags: true, MaxChoices: 100}
+	noCollections := ports.ClassifierCapabilities{FixedChoice: true, ProposeTags: true, MaxChoices: 100}
+	tests := []struct {
+		name string
+		caps *ports.ClassifierCapabilities // nil: the test classifier, which can't propose.
+		body domain.Taxonomy
+		want string
+	}{
+		{"dynamic with no proposer", nil, dynamicTaxonomy(12, false), "roles.proposer"},
+		{"more collections than MaxChoices", nil, fixedTaxonomy(101), "101"},
+		{"max_collections above MaxChoices", &canPropose, dynamicTaxonomy(101, false), "max_collections"},
+		{"dynamic with no cap on collections", &canPropose, dynamicTaxonomy(0, false), "max_collections"},
+		{"auto_create with no collection proposals", &noCollections, dynamicTaxonomy(12, true), "auto_create"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, false)
+			if tc.caps != nil {
+				e.shutdown()
+				e.classifierOverride = proposing{e.c, *tc.caps}
+				e.boot()
+			}
+			code, out := e.do(http.MethodPut, "/v1/taxonomies/added", putBody(t, tc.body))
+			if code != http.StatusUnprocessableEntity || !bytes.Contains(out, []byte("validation_failed")) || !bytes.Contains(out, []byte(tc.want)) {
+				t.Fatalf("PUT = %d %s, want a 422 about %s", code, out, tc.want)
+			}
+			if code, out := e.do(http.MethodGet, "/v1/taxonomies/added", ""); code != http.StatusNotFound {
+				t.Fatalf("GET after a refused PUT = %d %s", code, out)
+			}
+			e.shutdown()
+			e.boot()
+		})
+	}
+}
+
+// What the rules allow still goes through, right up to the limit, and starts.
+func TestPutTaxonomyAcceptsWhatStarts(t *testing.T) {
+	e := newEnv(t, false)
+	e.shutdown()
+	e.classifierOverride = proposing{e.c, ports.ClassifierCapabilities{FixedChoice: true, ProposeCollections: true, ProposeTags: true, MaxChoices: 100}}
+	e.boot()
+	for name, body := range map[string]domain.Taxonomy{"big": fixedTaxonomy(100), "auto": dynamicTaxonomy(100, true)} {
+		if code, out := e.do(http.MethodPut, "/v1/taxonomies/"+name, putBody(t, body)); code != http.StatusOK {
+			t.Fatalf("PUT %s = %d %s", name, code, out)
+		}
+	}
+	e.shutdown()
+	e.boot()
 }
 
 func TestDeployChangesNothing(t *testing.T) {

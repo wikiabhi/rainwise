@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"slices"
 	"sync"
@@ -35,13 +36,15 @@ const (
 
 // BuildDeps are optional test overrides. Provider stands in for processing.provider
 // and Classifier for roles.classifier, whatever type their config entries name.
-// Ticker replaces the scheduler's clock, and PollEvery how often the job runner and
-// event worker look for work.
+// Ticker replaces the scheduler's clock, PollEvery how often the job runner and
+// event worker look for work, and StopWait how long Shutdown waits for what it has
+// cancelled.
 type BuildDeps struct {
 	Provider   ports.Provider
 	Classifier ports.Classifier
 	Ticker     scheduler.TickerFunc
 	PollEvery  time.Duration
+	StopWait   time.Duration
 }
 
 // App is the wired service.
@@ -51,10 +54,12 @@ type App struct {
 
 	store     *sqlite.Store
 	server    *http.Server
+	listener  net.Listener
 	runner    *jobs.Runner
 	worker    *events.Worker
 	scheduler *scheduler.Scheduler
 	log       *slog.Logger
+	stopWait  time.Duration
 
 	stopScheduler, stopWorker context.CancelFunc
 	schedulerDone, workerDone chan struct{}
@@ -112,6 +117,13 @@ func Build(cfg *config.Config, deps BuildDeps) (*App, error) {
 func wire(ctx context.Context, cfg *config.Config, deps BuildDeps, ad *adapters, store *sqlite.Store) (*App, error) {
 	log := slog.Default()
 	taxonomies := taxonomy.New(store.Taxonomies())
+	// What a PUT or a proposal stores must not stop the next start.
+	taxonomies.Check = func(t domain.Taxonomy) error {
+		if err := checkTaxonomy(cfg, ad, t); err != nil {
+			return fmt.Errorf("%w: %w", err, domain.ErrValidation)
+		}
+		return nil
+	}
 	if err := taxonomies.Seed(ctx, ad.configured, log); err != nil {
 		return nil, err
 	}
@@ -204,6 +216,7 @@ func wire(ctx context.Context, cfg *config.Config, deps BuildDeps, ad *adapters,
 		}),
 		scheduler: newScheduler(cfg, svc, ad.name, deps.Ticker, log),
 		log:       log,
+		stopWait:  cmp.Or(deps.StopWait, stopWait),
 	}, nil
 }
 
@@ -248,8 +261,20 @@ func (a *App) Start(ctx context.Context) {
 	}
 }
 
-// Serve listens on server.addr until Shutdown, when it returns http.ErrServerClosed.
-func (a *App) Serve() error { return a.server.ListenAndServe() }
+// Listen binds server.addr. Call it before Start, so that a port that's taken stops
+// the service before it recovers any job.
+func (a *App) Listen() error {
+	l, err := net.Listen("tcp", a.server.Addr)
+	if err != nil {
+		return fmt.Errorf("server.addr: %w", err)
+	}
+	a.listener = l
+	return nil
+}
+
+// Serve answers on the address Listen bound until Shutdown, when it returns
+// http.ErrServerClosed.
+func (a *App) Serve() error { return a.server.Serve(a.listener) }
 
 // Shutdown stops the service in dependency order. The scheduler goes first, then
 // jobs finish their in-flight items and save a checkpoint (§10.5) while the API can
@@ -263,17 +288,21 @@ func (a *App) Shutdown(ctx context.Context) error {
 func (a *App) shutdown(ctx context.Context) error {
 	var errs []error
 
-	// Work that has been cancelled returns soon, but the database mustn't close
-	// under it, so this wait doesn't depend on ctx having any time left.
-	settle, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopWait)
-	defer cancel()
+	// Work that has been cancelled returns soon, but the database mustn't close under
+	// it. Each wait starts after its cancel, and doesn't depend on ctx: however long
+	// an orderly drain took, or however little of ctx is left, this much still stands.
+	settle := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.WithoutCancel(ctx), a.stopWait)
+	}
 	wait := func(what string, done <-chan struct{}) {
 		if done == nil {
 			return
 		}
+		sctx, cancel := settle()
+		defer cancel()
 		select {
 		case <-done:
-		case <-settle.Done():
+		case <-sctx.Done():
 			errs = append(errs, fmt.Errorf("%s did not stop in time", what))
 		}
 	}
@@ -285,12 +314,17 @@ func (a *App) shutdown(ctx context.Context) error {
 	if err := a.runner.Shutdown(ctx); err != nil {
 		a.log.Warn("jobs did not stop in time; cancelling them", "error", err)
 		errs = append(errs, fmt.Errorf("job runner: %w", err))
-		if err := a.runner.Shutdown(settle); err != nil {
+		sctx, cancel := settle()
+		defer cancel()
+		if err := a.runner.Shutdown(sctx); err != nil {
 			errs = append(errs, fmt.Errorf("job runner: %w", err))
 		}
 	}
 	if err := a.server.Shutdown(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("http server: %w", err), a.server.Close())
+	}
+	if a.listener != nil {
+		_ = a.listener.Close() // Serve may never have taken it over.
 	}
 	if a.stopWorker != nil {
 		a.stopWorker()

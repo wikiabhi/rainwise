@@ -14,6 +14,11 @@ import (
 // Service is the front door for taxonomies (§8.1).
 type Service struct {
 	store ports.TaxonomyStore
+
+	// Check, if set, also vets each taxonomy Put stores, for rules that depend on
+	// what's configured beyond the taxonomy. Its errors should wrap ErrValidation.
+	// Set it before the first call.
+	Check func(domain.Taxonomy) error
 }
 
 func New(store ports.TaxonomyStore) *Service { return &Service{store: store} }
@@ -33,6 +38,11 @@ func (s *Service) Put(ctx context.Context, id string, t domain.Taxonomy, ifVersi
 	t.ID = id
 	if err := validate(t); err != nil {
 		return domain.Taxonomy{}, err
+	}
+	if s.Check != nil {
+		if err := s.Check(t); err != nil {
+			return domain.Taxonomy{}, err
+		}
 	}
 	cur, err := s.store.GetTaxonomy(ctx, id)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {

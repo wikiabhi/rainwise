@@ -101,6 +101,20 @@ func serve(signals context.Context, path string, stdout, stderr io.Writer, geten
 		return exitError
 	}
 
+	stop := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		return a.Shutdown(ctx)
+	}
+	// Before Start, so that a port that's taken can't run job recovery first.
+	if err := a.Listen(); err != nil {
+		fmt.Fprintln(stderr, err)
+		if err := stop(); err != nil {
+			fmt.Fprintln(stderr, err)
+		}
+		return exitError
+	}
+
 	// Jobs outlive the signal: Shutdown lets their in-flight items finish, which
 	// cancelling this context wouldn't.
 	a.Start(context.Background())
@@ -117,9 +131,7 @@ func serve(signals context.Context, path string, stdout, stderr io.Writer, geten
 			code = exitError
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
-	defer cancel()
-	if err := a.Shutdown(ctx); err != nil {
+	if err := stop(); err != nil {
 		fmt.Fprintln(stderr, err)
 		code = exitError
 	}
