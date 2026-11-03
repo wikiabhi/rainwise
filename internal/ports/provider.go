@@ -65,3 +65,9 @@ type ListQuery struct {
 	PageToken  string     // opaque: a page number or a cursor
 	Limit      int
 }
+
+// URLResolver is optional. It resolves a bookmark URL to its ID, for events
+// that carry only a URL.
+type URLResolver interface {
+	ResolveURL(ctx context.Context, url string) (domain.ID, error)
+}
