@@ -98,17 +98,26 @@ func Run(t *testing.T, c ports.Classifier, stub Stub) {
 	})
 
 	t.Run("ProposeTags", func(t *testing.T) {
+		// The backend offers two vocabulary tags and one invented tag.
 		want := base
-		want.Tags = []domain.TagSuggestion{{Name: "databases"}, {Name: "storage"}}
-		got := classify(t, want, request(true, 2)).Tags
+		want.Tags = []domain.TagSuggestion{{Name: "databases"}, {Name: "storage"}, {Name: "invented-tag"}}
+		got := classify(t, want, request(true, 3)).Tags
+		if len(got) > 3 {
+			t.Errorf("TagsWanted 3, got %v", got)
+		}
+		inVocab := func(n string) bool { return n == "databases" || n == "storage" }
+		var novel int
+		for _, tg := range got {
+			if !inVocab(tg.Name) {
+				novel++
+			}
+		}
 		if caps.ProposeTags && len(got) == 0 {
 			t.Error("declared, but no tags returned")
 		}
-		if !caps.ProposeTags && len(got) != 0 {
-			t.Errorf("not declared, but returned %v", got)
-		}
-		if len(got) > 2 {
-			t.Errorf("TagsWanted 2, got %v", got)
+		// Not declared: tags chosen from the vocabulary are fine; inventing is not.
+		if !caps.ProposeTags && novel > 0 {
+			t.Errorf("not declared, but returned tags outside the vocabulary: %v", got)
 		}
 	})
 
