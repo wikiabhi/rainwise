@@ -181,32 +181,23 @@ type libraryScan struct {
 // scanLibrary lists every bookmark before any item is processed.
 func (d Deps) scanLibrary(ctx context.Context, job *domain.Job, rc RunContext, match scopeMatcher, keepSubjects bool) (*libraryScan, error) {
 	scan := &libraryScan{tags: map[string]int{}}
-	for token := ""; ; {
-		if err := stopErr(ctx, rc); err != nil {
-			return nil, err
+	err := taxonomy.ScanLibrary(ctx, d.Provider, job.Params.BatchSize, func() error { return stopErr(ctx, rc) }, func(b domain.Bookmark) {
+		for _, t := range b.Tags {
+			scan.tags[t]++
 		}
-		page, err := d.Provider.ListBookmarks(ctx, ports.ListQuery{PageToken: token, Limit: job.Params.BatchSize})
-		if err != nil {
-			return nil, fmt.Errorf("scan bookmarks: %w", err)
-		}
-		for _, b := range page.Items {
-			for _, t := range b.Tags {
-				scan.tags[t]++
-			}
-			if match.matches(b) {
-				scan.matched++
-				if keepSubjects {
-					scan.subjects = append(scan.subjects, ports.Subject{Bookmark: domain.Bookmark{
-						ID: b.ID, Title: b.Title, Description: b.Description, Tags: b.Tags,
-					}})
-				}
+		if match.matches(b) {
+			scan.matched++
+			if keepSubjects {
+				scan.subjects = append(scan.subjects, ports.Subject{Bookmark: domain.Bookmark{
+					ID: b.ID, Title: b.Title, Description: b.Description, Tags: b.Tags,
+				}})
 			}
 		}
-		if page.NextToken == "" {
-			return scan, nil
-		}
-		token = page.NextToken
+	})
+	if err != nil {
+		return nil, err
 	}
+	return scan, nil
 }
 
 // listedTags asks the provider for tag counts, reporting whether it could.
@@ -231,6 +222,10 @@ func (d Deps) vocabularyTerms(ctx context.Context, job *domain.Job, rc RunContex
 		counts = scan.tags
 	}
 	terms := taxonomy.TopTerms(counts, d.TagVocabSize)
+	// Persisted for the webhook worker, which can't afford a scan per event.
+	if err := taxonomy.SaveVocab(ctx, d.Store.BookmarkStates(), d.Provider.Name(), terms); err != nil {
+		return nil, scan, fmt.Errorf("save tag vocabulary: %w", err)
+	}
 	return terms, scan, nil
 }
 

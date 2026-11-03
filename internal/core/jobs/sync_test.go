@@ -696,3 +696,32 @@ func TestSyncUsesAllowNewTags(t *testing.T) {
 		}
 	}
 }
+
+// The webhook worker reads the vocabulary sync and backfill computed.
+func TestRunsPersistTagVocabulary(t *testing.T) {
+	persisted := func(e *jobEnv) []string {
+		terms, ok, err := taxonomy.LoadVocab(context.Background(), e.store.BookmarkStates(), "fake")
+		if err != nil || !ok {
+			t.Fatalf("LoadVocab = %v, %v", ok, err)
+		}
+		return terms
+	}
+	t.Run("sync", func(t *testing.T) {
+		e := newJobEnv(t)
+		e.addBookmark(1, colAlpha, "rare", "common")
+		e.addBookmark(2, colAlpha, "common")
+		e.syncNow()
+		if got := persisted(e); !slices.Equal(got, []string{"common", "rare"}) {
+			t.Errorf("vocab = %v", got)
+		}
+	})
+	t.Run("backfill", func(t *testing.T) {
+		e := newJobEnv(t)
+		e.addBookmark(1, colBeta, "rare", "common")
+		e.addBookmark(2, colBeta, "common")
+		e.backfill(nil)
+		if got := persisted(e); !slices.Equal(got, []string{"common", "rare"}) {
+			t.Errorf("vocab = %v", got)
+		}
+	})
+}

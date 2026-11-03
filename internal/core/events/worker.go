@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/wikiabhi/rainwise/internal/core/pipeline"
@@ -91,6 +92,7 @@ type WorkerDeps struct {
 type Worker struct {
 	d        WorkerDeps
 	lastDrop time.Time
+	vocabMu  sync.Mutex // serializes persisted-vocabulary updates
 }
 
 func NewWorker(d WorkerDeps) *Worker {
@@ -276,13 +278,9 @@ func (w *Worker) options(ctx context.Context, tagsOnly bool) (pipeline.Options, 
 	if err != nil {
 		return pipeline.Options{}, err
 	}
-	var terms []string
-	counts, ok, err := taxonomy.ListedTags(ctx, w.d.Provider)
+	terms, err := w.vocabulary(ctx)
 	if err != nil {
 		return pipeline.Options{}, err
-	}
-	if ok {
-		terms = taxonomy.TopTerms(counts, w.d.TagVocabSize)
 	}
 	return pipeline.Options{
 		Trigger:  pipeline.TriggerWebhook,
@@ -296,6 +294,72 @@ func (w *Worker) options(ctx context.Context, tagsOnly bool) (pipeline.Options, 
 	}, nil
 }
 
+// vocabulary is the provider's tag listing, else the persisted vocabulary (§8.4),
+// which one library scan makes if there is none yet.
+func (w *Worker) vocabulary(ctx context.Context) ([]string, error) {
+	counts, ok, err := taxonomy.ListedTags(ctx, w.d.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		return taxonomy.TopTerms(counts, w.d.TagVocabSize), nil
+	}
+	w.vocabMu.Lock()
+	defer w.vocabMu.Unlock()
+	states := w.d.Store.BookmarkStates()
+	name := w.d.Provider.Name()
+	terms, ok, err := taxonomy.LoadVocab(ctx, states, name)
+	if err != nil || ok {
+		return terms, err
+	}
+	scanned := map[string]int{}
+	err = taxonomy.ScanLibrary(ctx, w.d.Provider, 0, nil, func(b domain.Bookmark) {
+		for _, t := range b.Tags {
+			scanned[t]++
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	terms = taxonomy.TopTerms(scanned, w.d.TagVocabSize)
+	if err := taxonomy.SaveVocab(ctx, states, name, terms); err != nil {
+		return nil, fmt.Errorf("save tag vocabulary: %w", err)
+	}
+	return terms, nil
+}
+
+// rememberTags adds the new tags a real run wrote to the persisted vocabulary, so
+// later items reuse them. A provider that lists its own tags needs no help.
+func (w *Worker) rememberTags(ctx context.Context, out pipeline.Outcome, vocab *taxonomy.RunVocab) error {
+	if out.Status != pipeline.Changed {
+		return nil
+	}
+	var added []string
+	for _, t := range out.Record.AddTags {
+		if _, known := vocab.Existing(t); !known {
+			added = append(added, t)
+		}
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	if _, listed, err := taxonomy.ListedTags(ctx, w.d.Provider); err != nil || listed {
+		return err
+	}
+	w.vocabMu.Lock()
+	defer w.vocabMu.Unlock()
+	states := w.d.Store.BookmarkStates()
+	name := w.d.Provider.Name()
+	terms, _, err := taxonomy.LoadVocab(ctx, states, name)
+	if err != nil {
+		return err
+	}
+	if err := taxonomy.SaveVocab(ctx, states, name, taxonomy.AddVocab(terms, added, w.d.TagVocabSize)); err != nil {
+		return fmt.Errorf("save tag vocabulary: %w", err)
+	}
+	return nil
+}
+
 func (w *Worker) process(ctx context.Context, item pipeline.WorkItem, tagsOnly bool) error {
 	opts, err := w.options(ctx, tagsOnly)
 	if err != nil {
@@ -303,6 +367,9 @@ func (w *Worker) process(ctx context.Context, item pipeline.WorkItem, tagsOnly b
 	}
 	out, err := w.d.Pipeline.Process(ctx, item, opts)
 	if err != nil {
+		return err
+	}
+	if err := w.rememberTags(ctx, out, opts.Vocab); err != nil {
 		return err
 	}
 	// Webhook items have no job, so no decision is saved; the log is the record.

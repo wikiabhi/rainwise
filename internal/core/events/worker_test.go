@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -469,5 +470,151 @@ func TestHighlightForcedPastRecordedHash(t *testing.T) {
 	e.tick(w)
 	if e.cls.Calls() != 2 || !slices.Contains(e.bookmark().Tags, "insight") {
 		t.Errorf("calls = %d, tags = %v", e.cls.Calls(), e.bookmark().Tags)
+	}
+}
+
+type scanCounter struct {
+	*pfake.Provider
+	scans atomic.Int32
+}
+
+func (s *scanCounter) ListBookmarks(ctx context.Context, q ports.ListQuery) (domain.Page[domain.Bookmark], error) {
+	s.scans.Add(1)
+	return s.Provider.ListBookmarks(ctx, q)
+}
+
+// noListing switches off the provider's tag listing, so the worker has to use
+// the persisted vocabulary.
+func (e *env) noListing(allowNew bool) {
+	e.t.Helper()
+	caps := e.provider.Capabilities()
+	caps.TagListing = false
+	e.provider.SetCapabilities(caps)
+	tx := testTaxonomy()
+	tx.Rules.AllowNewTags = allowNew
+	if _, err := e.store.Taxonomies().PutTaxonomy(context.Background(), tx, nil); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func (e *env) persisted() []string {
+	e.t.Helper()
+	terms, _, err := taxonomy.LoadVocab(context.Background(), e.store.BookmarkStates(), "fake")
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return terms
+}
+
+func (e *env) savePersisted(terms ...string) {
+	e.t.Helper()
+	if err := taxonomy.SaveVocab(context.Background(), e.store.BookmarkStates(), "fake", terms); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func (e *env) addSecond() {
+	second := inbox()
+	second.ID = domain.ID{Provider: "fake", Local: "2"}
+	second.URL = "https://example.test/two"
+	e.provider.Add(second)
+}
+
+func TestPersistedVocabWithoutNewTags(t *testing.T) {
+	e := newEnv(t)
+	e.noListing(false)
+	e.savePersisted("go")
+	e.provider.Add(inbox())
+	e.cls.Script(cfake.Result{Decision: decision("a", 0.9, "go", "rust")})
+	e.ingest(e.event(domain.EventBookmarkCreated, ref("1")))
+	e.tick(e.worker(e.provider, false))
+	got := e.bookmark()
+	if !slices.Contains(got.Tags, "go") || slices.Contains(got.Tags, "rust") {
+		t.Errorf("tags = %v, want the persisted go and not rust", got.Tags)
+	}
+}
+
+func TestPersistedVocabGrowsWithNewTags(t *testing.T) {
+	e := newEnv(t)
+	e.noListing(true)
+	e.savePersisted("go")
+	e.provider.Add(inbox())
+	e.addSecond()
+	e.cls.Script(cfake.Result{Decision: decision("a", 0.9, "Brand-New")})
+	w := e.worker(e.provider, false)
+	e.ingest(e.event(domain.EventBookmarkCreated, ref("1")), e.event(domain.EventBookmarkCreated, ref("2")))
+	e.tick(w)
+
+	reqs := e.cls.Requests()
+	if len(reqs) != 2 {
+		t.Fatalf("requests = %d", len(reqs))
+	}
+	if !slices.Contains(reqs[0].TagVocab, "go") || slices.Contains(reqs[0].TagVocab, "brand-new") {
+		t.Errorf("first vocab = %v", reqs[0].TagVocab)
+	}
+	if !slices.Contains(reqs[1].TagVocab, "brand-new") {
+		t.Errorf("tag accepted for one event wasn't offered for the next: %v", reqs[1].TagVocab)
+	}
+	if got := e.persisted(); !slices.Contains(got, "brand-new") || !slices.Contains(got, "go") {
+		t.Errorf("persisted = %v", got)
+	}
+}
+
+func TestVocabScansOnce(t *testing.T) {
+	e := newEnv(t)
+	e.noListing(true)
+	b := inbox()
+	b.Tags = []string{"existing"}
+	e.provider.Add(b)
+	e.addSecond()
+	sc := &scanCounter{Provider: e.provider}
+	e.ingest(e.event(domain.EventBookmarkCreated, ref("1")), e.event(domain.EventBookmarkCreated, ref("2")))
+	e.tick(e.worker(sc, false))
+	if n := sc.scans.Load(); n != 1 {
+		t.Errorf("library scans = %d, want 1", n)
+	}
+	reqs := e.cls.Requests()
+	if len(reqs) != 2 || !slices.Contains(reqs[0].TagVocab, "existing") {
+		t.Errorf("vocab = %+v", reqs)
+	}
+	if !slices.Contains(e.persisted(), "existing") {
+		t.Errorf("persisted = %v", e.persisted())
+	}
+}
+
+func TestWebhookSavesNoDecision(t *testing.T) {
+	e := newEnv(t)
+	e.provider.Add(inbox())
+	e.ingest(e.event(domain.EventBookmarkCreated, ref("1")))
+	e.tick(e.worker(e.provider, false))
+	if e.bookmark().Collection != colA {
+		t.Fatal("event not processed")
+	}
+	page, err := e.store.Jobs().ListDecisions(context.Background(), "", "", 10)
+	if err != nil || len(page.Items) != 0 {
+		t.Errorf("decisions = %+v, err %v; want none", page.Items, err)
+	}
+}
+
+func TestLowConfidenceHighlightAddsNoTags(t *testing.T) {
+	e := newEnv(t)
+	b := inbox()
+	b.Collection = colB
+	b.Tags = []string{"mine"}
+	e.provider.Add(b)
+	e.provider.AddHighlight(domain.Highlight{ID: domain.ID{Provider: "fake", Local: "h1"}, Bookmark: bm1, Text: "x", CreatedAt: e.now})
+	e.cls.Script(cfake.Result{Decision: decision("a", 0.3, "go")}) // below 0.6
+	ev := e.event(domain.EventHighlightCreated, ref("h1"))
+	ev.Bookmark = &domain.ResourceRef{ID: "1"}
+	e.ingest(ev)
+	e.tick(e.worker(e.provider, false))
+	if e.cls.Calls() != 1 {
+		t.Fatalf("classifier calls = %d", e.cls.Calls())
+	}
+	if got := e.bookmark(); !slices.Equal(got.Tags, []string{"mine"}) || got.Collection != colB {
+		t.Errorf("bookmark = %+v", got)
+	}
+	if e.status(ev.DedupKey).Status != domain.EventDone {
+		t.Error("event not done")
 	}
 }
