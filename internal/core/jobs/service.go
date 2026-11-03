@@ -65,6 +65,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (job domain.Job
 	} else if ok {
 		return j, false, nil
 	}
+	if req, err = s.inheritPlanScope(ctx, req); err != nil {
+		return domain.Job{}, false, err
+	}
 	if err := s.validate(ctx, req); err != nil {
 		return domain.Job{}, false, err
 	}
@@ -145,8 +148,37 @@ func (s *Service) validate(ctx context.Context, req CreateRequest) error {
 	return nil
 }
 
+// inheritPlanScope gives an apply job with no scope its dry run's. An unknown dry
+// run is left for validatePlan to report.
+func (s *Service) inheritPlanScope(ctx context.Context, req CreateRequest) (CreateRequest, error) {
+	if req.FromDryRun == "" || !req.Scope.IsEmpty() {
+		return req, nil
+	}
+	plan, err := s.d.Store.Jobs().GetJob(ctx, req.FromDryRun)
+	if errors.Is(err, domain.ErrNotFound) {
+		return req, nil
+	}
+	if err != nil {
+		return req, err
+	}
+	req.Scope = plan.Scope
+	return req, nil
+}
+
+// sameScope compares scopes as sets of entries, spelled as given.
+func sameScope(a, b domain.Scope) bool {
+	same := func(x, y []string) bool {
+		x, y = slices.Clone(x), slices.Clone(y)
+		slices.Sort(x)
+		slices.Sort(y)
+		return slices.Equal(slices.Compact(x), slices.Compact(y))
+	}
+	return same(a.Collections, b.Collections) && same(a.Tags, b.Tags) && same(a.IDs, b.IDs)
+}
+
 // validatePlan checks that from_dry_run names a finished dry run this job can
-// apply: a plan is only meaningful for its own type, provider, and taxonomy.
+// apply: a plan is only meaningful for its own type, provider, taxonomy, and
+// scope, and §7.3 applies it as a whole.
 func (s *Service) validatePlan(ctx context.Context, req CreateRequest) error {
 	if req.DryRun {
 		return fmt.Errorf("from_dry_run applies a plan, so it can't be a dry run: %w", domain.ErrValidation)
@@ -167,6 +199,8 @@ func (s *Service) validatePlan(ctx context.Context, req CreateRequest) error {
 		return fmt.Errorf("from_dry_run: job %q is for provider %q: %w", plan.ID, plan.Provider, domain.ErrValidation)
 	case plan.TaxonomyID != req.Taxonomy:
 		return fmt.Errorf("from_dry_run: job %q used taxonomy %q: %w", plan.ID, plan.TaxonomyID, domain.ErrValidation)
+	case !sameScope(plan.Scope, req.Scope):
+		return fmt.Errorf("from_dry_run: scope differs from that of job %q: %w", plan.ID, domain.ErrValidation)
 	case plan.Status != domain.JobSucceeded && plan.Status != domain.JobSucceededWithErrors:
 		return fmt.Errorf("from_dry_run: job %q is %s: %w", plan.ID, plan.Status, domain.ErrConflict)
 	}

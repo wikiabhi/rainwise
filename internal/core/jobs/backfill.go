@@ -101,6 +101,11 @@ func (d Deps) runBatch(ctx context.Context, job *domain.Job, rc RunContext, trig
 			if err != nil {
 				return pipeline.Outcome{}, err
 			}
+			if plan == nil {
+				return pipeline.Outcome{Status: pipeline.Skipped, Record: domain.DecisionRecord{
+					JobID: job.ID, Bookmark: item.Bookmark, Reason: "not in the plan",
+				}}, nil
+			}
 			itemOpts.Plan = plan
 		}
 		out, err := d.Pipeline.Process(ctx, item, itemOpts)
@@ -236,8 +241,10 @@ func (d Deps) applyPinRules(ctx context.Context, job *domain.Job, opts *pipeline
 	return nil
 }
 
-// planFor returns the dry run's decision on a bookmark, or nil if it made none. A
-// target that was only planned becomes the collection now provisioned. If the
+// planFor returns the dry run's decision on a bookmark, or nil if it made none, in
+// which case an apply job leaves the bookmark alone: applying a plan writes only
+// what was reviewed (§7.3), and sync or a later job covers the rest. A target that
+// was only planned becomes the collection now provisioned. If the
 // taxonomy has since dropped it, the bookmark is classified again, as one whose
 // hash changed would be.
 func (d Deps) planFor(ctx context.Context, dryRunID string, id domain.ID, resolved map[string]domain.ID) (*domain.DecisionRecord, error) {

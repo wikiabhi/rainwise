@@ -887,3 +887,147 @@ func TestHandlersWithRunner(t *testing.T) {
 		t.Errorf("job = %+v", done)
 	}
 }
+
+// createApply creates a from_dry_run job through the service, as the API does, after
+// marking the dry run finished.
+func (e *jobEnv) createApply(dry *domain.Job, scope domain.Scope, params domain.JobParams) (domain.Job, error) {
+	e.t.Helper()
+	dry.Status = domain.JobSucceeded
+	if err := e.store.Jobs().UpdateJob(context.Background(), *dry); err != nil {
+		e.t.Fatal(err)
+	}
+	svc := NewService(ServiceDeps{Store: e.store, ProviderNames: []string{"fake"}, Now: e.nowFn})
+	job, _, err := svc.Create(context.Background(), CreateRequest{Type: dry.Type, Provider: "fake", Taxonomy: "default",
+		FromDryRun: dry.ID, Scope: scope, Params: params})
+	return job, err
+}
+
+func TestApplyStaysWithinThePlan(t *testing.T) {
+	jobTypes := map[string]domain.JobType{"backfill": domain.JobBackfill, "reclassify": domain.JobReclassify}
+	for name, typ := range jobTypes {
+		t.Run(name+": trial scope, then an unscoped apply", func(t *testing.T) {
+			e := newJobEnv(t)
+			planned := e.addBookmark(1, pfake.Inbox)
+			other := e.addBookmark(2, pfake.Inbox)
+			scope := domain.Scope{IDs: []string{planned.String()}}
+			dry := e.newJob(typ, func(j *domain.Job) { j.DryRun = true; j.Scope = scope })
+			e.mustRun(dry)
+			calls := e.cls.Calls()
+
+			job, err := e.createApply(dry, domain.Scope{}, domain.JobParams{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(job.Scope, scope) {
+				t.Fatalf("scope = %+v, want the dry run's", job.Scope)
+			}
+			e.mustRun(&job)
+
+			if e.cls.Calls() != calls {
+				t.Errorf("classifier calls = %d, want %d", e.cls.Calls(), calls)
+			}
+			if w := e.provider.Writes(); len(w) != 1 || w[0].ID != planned {
+				t.Errorf("writes = %+v", w)
+			}
+			if got := e.collectionOf(other); got != pfake.Inbox {
+				t.Errorf("out-of-plan bookmark moved to %v", got)
+			}
+			if len(e.snaps.calls) != 1 || !reflect.DeepEqual(e.snaps.calls[0], scope) {
+				t.Errorf("snapshot scopes = %+v", e.snaps.calls)
+			}
+			if _, ok := e.setting(firstBackfillKey); ok {
+				t.Error("first_backfill_done set by a scoped apply")
+			}
+		})
+
+		t.Run(name+": a differing scope is refused", func(t *testing.T) {
+			e := newJobEnv(t)
+			one, two := e.addBookmark(1, pfake.Inbox), e.addBookmark(2, pfake.Inbox)
+			dry := e.newJob(typ, func(j *domain.Job) { j.DryRun = true; j.Scope = domain.Scope{IDs: []string{one.String()}} })
+			e.mustRun(dry)
+			for _, scope := range []domain.Scope{
+				{IDs: []string{two.String()}},
+				{IDs: []string{one.String(), two.String()}},
+				{IDs: []string{one.String()}, Tags: []string{"x"}},
+			} {
+				if _, err := e.createApply(dry, scope, domain.JobParams{}); !errors.Is(err, domain.ErrValidation) {
+					t.Errorf("scope %+v: err = %v, want ErrValidation", scope, err)
+				}
+			}
+		})
+
+		t.Run(name+": the same scope in another order is accepted", func(t *testing.T) {
+			e := newJobEnv(t)
+			one, two := e.addBookmark(1, pfake.Inbox), e.addBookmark(2, pfake.Inbox)
+			dry := e.newJob(typ, func(j *domain.Job) {
+				j.DryRun = true
+				j.Scope = domain.Scope{IDs: []string{one.String(), two.String()}}
+			})
+			e.mustRun(dry)
+			if _, err := e.createApply(dry, domain.Scope{IDs: []string{two.String(), one.String()}}, domain.JobParams{}); err != nil {
+				t.Errorf("err = %v", err)
+			}
+		})
+	}
+
+	t.Run("a narrower apply of a whole-library plan is refused", func(t *testing.T) {
+		e := newJobEnv(t)
+		id := e.addBookmark(1, pfake.Inbox)
+		dry := e.backfill(dryRun)
+		if _, err := e.createApply(dry, domain.Scope{IDs: []string{id.String()}}, domain.JobParams{}); !errors.Is(err, domain.ErrValidation) {
+			t.Errorf("err = %v, want ErrValidation", err)
+		}
+	})
+
+	t.Run("a bookmark added after the dry run is untouched", func(t *testing.T) {
+		e := newJobEnv(t)
+		planned := e.addBookmark(1, pfake.Inbox)
+		dry := e.backfill(dryRun)
+		late := e.addBookmark(2, pfake.Inbox)
+		calls := e.cls.Calls()
+
+		job, err := e.createApply(dry, domain.Scope{}, domain.JobParams{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.mustRun(&job)
+
+		if e.cls.Calls() != calls {
+			t.Errorf("classifier calls = %d, want %d", e.cls.Calls(), calls)
+		}
+		if got := e.collectionOf(late); got != pfake.Inbox {
+			t.Errorf("late bookmark moved to %v", got)
+		}
+		if got := e.collectionOf(planned); got != colAlpha {
+			t.Errorf("planned bookmark in %v", got)
+		}
+		if _, known, _ := e.store.BookmarkStates().GetState(context.Background(), late); known {
+			t.Error("recorded state for a bookmark outside the plan, which a later sync would read as handled")
+		}
+		if job.Progress.Skipped != 1 || job.Progress.Processed != 2 || job.Progress.Failed != 0 {
+			t.Errorf("progress = %+v", job.Progress)
+		}
+		// A whole-library apply is still the first backfill.
+		if _, ok := e.setting(firstBackfillKey); !ok {
+			t.Error("first_backfill_done not set by a whole-library apply")
+		}
+	})
+
+	t.Run("a planned bookmark that changed is still classified again", func(t *testing.T) {
+		e := newJobEnv(t)
+		id := e.addBookmark(1, pfake.Inbox)
+		dry := e.backfill(dryRun)
+		b, _ := e.provider.Bookmark(id)
+		b.Title = "Something else"
+		e.provider.Add(b)
+		calls := e.cls.Calls()
+		job, err := e.createApply(dry, domain.Scope{}, domain.JobParams{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.mustRun(&job)
+		if e.cls.Calls() != calls+1 {
+			t.Errorf("classifier calls = %d, want %d", e.cls.Calls(), calls+1)
+		}
+	})
+}
