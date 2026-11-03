@@ -145,6 +145,32 @@ func (s jobStore) UpdateJob(ctx context.Context, j domain.Job) error {
 	return nil
 }
 
+func (s jobStore) UpdateJobIf(ctx context.Context, j domain.Job, from ...domain.JobStatus) (bool, error) {
+	a := jobArgs(j)
+	args := append(a[1:], j.ID)
+	marks := make([]string, len(from))
+	for i, st := range from {
+		marks[i] = "?"
+		args = append(args, string(st))
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE jobs SET type=?, status=?, provider=?, taxonomy_id=?, dry_run=?, params=?, scope=?,
+		from_dry_run=?, snapshot_id=?, idempotency_key=?, error=?, progress=?, checkpoint=?, created_at=?, started_at=?, finished_at=?
+		WHERE id = ? AND status IN (`+strings.Join(marks, ",")+`)`, args...)
+	if isUnique(err) {
+		return false, fmt.Errorf("idempotency key %q exists: %w", j.IdempotencyKey, domain.ErrConflict)
+	}
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return true, nil
+	}
+	if _, err := s.GetJob(ctx, j.ID); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 func (s jobStore) ClaimNextQueued(ctx context.Context, provider string, dryRun bool) (domain.Job, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -176,6 +177,20 @@ func (j *jobStore) UpdateJob(_ context.Context, job domain.Job) error {
 	}
 	j.jobs[job.ID] = clone(job)
 	return nil
+}
+
+func (j *jobStore) UpdateJobIf(_ context.Context, job domain.Job, from ...domain.JobStatus) (bool, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	cur, ok := j.jobs[job.ID]
+	if !ok {
+		return false, notFound("job", job.ID)
+	}
+	if !slices.Contains(from, cur.Status) {
+		return false, nil
+	}
+	j.jobs[job.ID] = clone(job)
+	return true, nil
 }
 
 func (j *jobStore) ClaimNextQueued(_ context.Context, provider string, dryRun bool) (domain.Job, bool, error) {

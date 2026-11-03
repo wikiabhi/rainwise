@@ -22,6 +22,10 @@ type JobStore interface {
 	FindActiveJob(ctx context.Context, provider string, t domain.JobType) (domain.Job, bool, error)
 	ListJobs(ctx context.Context, cursor string, limit int) (domain.Page[domain.Job], error)
 	UpdateJob(ctx context.Context, j domain.Job) error
+	// UpdateJobIf writes j only if the stored status is among from, and reports
+	// whether it did. A job's status has more than one writer, and this is how they
+	// avoid overwriting each other. ErrNotFound if the job doesn't exist.
+	UpdateJobIf(ctx context.Context, j domain.Job, from ...domain.JobStatus) (bool, error)
 	ClaimNextQueued(ctx context.Context, provider string, dryRun bool) (domain.Job, bool, error)
 	ListRunning(ctx context.Context) ([]domain.Job, error)
 	SaveDecision(ctx context.Context, d domain.DecisionRecord) error

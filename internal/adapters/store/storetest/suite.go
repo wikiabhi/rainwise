@@ -246,6 +246,47 @@ func Run(t *testing.T, newStore func(t *testing.T) ports.Store) {
 		}
 	})
 
+	t.Run("UpdateJobIf", func(t *testing.T) {
+		js := newStore(t).Jobs()
+		j := job("j1", t0)
+		j.Status = domain.JobRunning
+		must(t, js.CreateJob(ctx, j))
+
+		j.Progress.Processed = 5
+		ok, err := js.UpdateJobIf(ctx, j, domain.JobRunning)
+		must(t, err)
+		if !ok {
+			t.Fatal("UpdateJobIf from the current status = false")
+		}
+		if got, _ := js.GetJob(ctx, "j1"); got.Progress.Processed != 5 {
+			t.Errorf("update not written: %+v", got.Progress)
+		}
+
+		stale := j
+		stale.Status, stale.Progress.Processed = domain.JobSucceeded, 9
+		ok, err = js.UpdateJobIf(ctx, stale, domain.JobQueued, domain.JobCancelling)
+		must(t, err)
+		if ok {
+			t.Fatal("UpdateJobIf from other statuses = true")
+		}
+		if got, _ := js.GetJob(ctx, "j1"); got.Status != domain.JobRunning || got.Progress.Processed != 5 {
+			t.Errorf("refused update changed the job: %+v", got)
+		}
+
+		ok, err = js.UpdateJobIf(ctx, stale, domain.JobQueued, domain.JobRunning)
+		must(t, err)
+		if !ok {
+			t.Fatal("UpdateJobIf with the status among several = false")
+		}
+		if got, _ := js.GetJob(ctx, "j1"); got.Status != domain.JobSucceeded {
+			t.Errorf("status = %s", got.Status)
+		}
+
+		if _, err := js.UpdateJobIf(ctx, job("nope", t0), domain.JobQueued); !errors.Is(err, domain.ErrNotFound) {
+			t.Errorf("missing job: err = %v, want ErrNotFound", err)
+		}
+	})
+
 	t.Run("DecisionRoundTripAndPaging", func(t *testing.T) {
 		js := newStore(t).Jobs()
 		must(t, js.CreateJob(ctx, job("j1", t0)))
