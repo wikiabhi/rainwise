@@ -1132,3 +1132,38 @@ func TestWebhookLoop(t *testing.T) {
 		t.Fatalf("our own move pinned the bookmark: %q", pin)
 	}
 }
+
+// vocabClassifier can't invent tags, like Jev: it asks about vocabulary terms only.
+type vocabClassifier struct{ *classifier }
+
+func (vocabClassifier) Capabilities() ports.ClassifierCapabilities {
+	return ports.ClassifierCapabilities{FixedChoice: true, CalibratedConfidence: true, MaxChoices: 100}
+}
+
+func (c vocabClassifier) Classify(ctx context.Context, r ports.ClassifyRequest) (domain.Decision, error) {
+	d, err := c.classifier.Classify(ctx, r)
+	d.Tags = nil
+	for i := 0; i < r.TagsWanted && i < len(r.TagVocab); i++ {
+		d.Tags = append(d.Tags, domain.TagSuggestion{Name: r.TagVocab[i]})
+	}
+	return d, err
+}
+
+func TestClassifierWithoutProposeTagsWritesVocabularyTags(t *testing.T) {
+	e := newEnv(t, true)
+	e.shutdown()
+	e.classifierOverride = vocabClassifier{e.c}
+	e.boot()
+	e.addCollections(inbox, colOld, colTec, colFoo, colRev)
+	e.add("seed", "tech: holds the tag", colOld, []string{"databases"})
+	e.run(`{"type":"sync"}`) // Baseline, and the vocabulary.
+
+	// A bookmark saved straight into a collection gets tags only.
+	id := e.add("direct", "tech: filed by hand", colOld, nil)
+	e.run(`{"type":"sync"}`)
+	if got := e.bookmark(id).Tags; !slices.Equal(got, []string{"databases"}) {
+		t.Fatalf("tags = %q", got)
+	}
+	e.wantIn(id, colOld)
+	e.wantNoSetTags()
+}

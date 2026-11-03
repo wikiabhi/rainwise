@@ -474,7 +474,7 @@ A later bookmark that doesn't fit goes to Needs Review, with the classifier's su
 
 - Normalized: trim, drop a leading `#`, lowercase, spaces to hyphens, apply `tag_aliases`. Existing user tags keep their exact form and are compared case-insensitively.
 - `TagVocab` is the 200 most-used tags (configurable) and seeds the prompt, which asks for reuse.
-- `max_tags` applies to the total. `room = max(0, max_tags - existing)`. A bookmark with 5 or more tags gets none added, and none removed.
+- `max_tags` applies to the total. `room = max(0, max_tags - existing)`. A bookmark already at `max_tags` gets none added, and none removed.
 - With `allow_new_tags: false`, or with Jev, only tags in the vocabulary are kept.
 - `min_tags` is a target. The validator never invents tags to reach it. A shortfall is recorded on the decision.
 - Normalizing also folds simple plurals to one form, so `llms` and `llm` match. New tags accepted during a run join that run's vocabulary, so later bookmarks reuse them **(design call)**.

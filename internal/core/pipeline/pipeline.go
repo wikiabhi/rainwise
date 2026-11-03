@@ -415,9 +415,6 @@ func (p *Pipeline) leave(ctx context.Context, r *run, dirty bool) (Outcome, erro
 }
 
 func tagRoom(existing []string, rules domain.TaxonomyRules) int {
-	if len(existing) >= tagsLockThreshold {
-		return 0
-	}
 	return max(0, rules.MaxTags-len(existing))
 }
 
@@ -548,7 +545,7 @@ func withKnownProposal(d domain.Decision, tax domain.Taxonomy) domain.Decision {
 
 func (p *Pipeline) classifyAndValidate(ctx context.Context, r *run, want bool) (Validated, domain.Decision, error) {
 	room := tagRoom(r.b.Tags, r.tax.Rules)
-	if !want && (room == 0 || !p.d.Classifier.Capabilities().ProposeTags) {
+	if !want && room == 0 {
 		return Validated{Reasons: []string{"nothing to decide"}}, domain.Decision{}, nil
 	}
 	content, err := p.fetchContent(ctx, r)
@@ -659,10 +656,6 @@ func (p *Pipeline) classify(ctx context.Context, r *run, content string, want bo
 
 // classifyWith retries invalid output once; a second failure is an error.
 func (p *Pipeline) classifyWith(ctx context.Context, c ports.Classifier, r *run, content string, want bool, room int) (domain.Decision, error) {
-	tags := room
-	if !c.Capabilities().ProposeTags {
-		tags = 0
-	}
 	var vocab []string
 	if r.opts.Vocab != nil {
 		vocab = r.opts.Vocab.Terms()
@@ -677,7 +670,7 @@ func (p *Pipeline) classifyWith(ctx context.Context, c ports.Classifier, r *run,
 			Rules:       r.tax.Rules,
 		},
 		TagVocab:       vocab,
-		TagsWanted:     tags,
+		TagsWanted:     room, // ProposeTags is about inventing tags, not choosing from TagVocab.
 		WantCollection: want,
 	}
 	d, err := c.Classify(ctx, req)

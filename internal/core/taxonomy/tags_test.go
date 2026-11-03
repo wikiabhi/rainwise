@@ -94,3 +94,23 @@ func TestTermsKeepsOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestComparisonKeyFoldsSeparators(t *testing.T) {
+	cases := []struct{ a, b string }{
+		{"System Design", "system-design"},
+		{"machine_learning", "machine-learning"},
+		{"Machine  Learning", "machine_learning"},
+		{"Design Patterns", "design-pattern"},
+	}
+	for _, c := range cases {
+		if a, b := ComparisonKey(c.a), ComparisonKey(c.b); a != b {
+			t.Errorf("ComparisonKey(%q) = %q, ComparisonKey(%q) = %q; want them equal", c.a, a, c.b, b)
+		}
+	}
+	v := NewRunVocab([]string{"System Design", "machine learning"}, nil, true)
+	for in, want := range map[string]string{"system-design": "System Design", "machine_learning": "machine learning"} {
+		if final, isNew, ok := v.Resolve(in); !ok || isNew || final != want {
+			t.Errorf("Resolve(%q) = %q, %v, %v; want the existing %q", in, final, isNew, ok, want)
+		}
+	}
+}

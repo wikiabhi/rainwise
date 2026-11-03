@@ -400,7 +400,7 @@ func TestApprovedNewTagsMapping(t *testing.T) {
 			approved: map[string]string{"n1": "one", "n2": "two", "n3": "three"},
 			want:     []string{"Mine", "go", "agents", "one"},
 		},
-		{name: "lock at five existing", existing: []string{"a1", "a2", "a3", "a4", "a5"}, plan: []string{"go"}, want: []string{"a1", "a2", "a3", "a4", "a5"}},
+		{name: "none added at max_tags", existing: []string{"a1", "a2", "a3", "a4", "a5"}, plan: []string{"go"}, want: []string{"a1", "a2", "a3", "a4", "a5"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -413,7 +413,7 @@ func TestApprovedNewTagsMapping(t *testing.T) {
 			o := options(TriggerBackfill)
 			o.Taxonomy.Rules.MaxTags = 4
 			if c.existing != nil {
-				o.Taxonomy.Rules.MaxTags = 8 // the 5-tag lock, not the cap, is under test
+				o.Taxonomy.Rules.MaxTags = 5
 			}
 			o.Vocab = taxonomy.NewRunVocab([]string{"go", "agents"}, nil, true)
 			o.Vocab.Resolve("proposed")
@@ -1839,4 +1839,89 @@ func TestDryRunMeetingALandedWrite(t *testing.T) {
 	if e.cls.Calls() != 0 || len(e.provider.Writes()) != 0 {
 		t.Errorf("calls = %d, writes = %d", e.cls.Calls(), len(e.provider.Writes()))
 	}
+}
+
+// vocabOnly is a classifier in the shape of Jev: it can't invent tags, but it
+// picks from the vocabulary whenever tags are wanted.
+type vocabOnly struct{ got []ports.ClassifyRequest }
+
+func (*vocabOnly) Name() string { return "vocab-only" }
+func (*vocabOnly) Capabilities() ports.ClassifierCapabilities {
+	return ports.ClassifierCapabilities{FixedChoice: true, MaxChoices: 100}
+}
+func (c *vocabOnly) Classify(_ context.Context, r ports.ClassifyRequest) (domain.Decision, error) {
+	c.got = append(c.got, r)
+	d := domain.Decision{Confidence: 0.9}
+	if r.WantCollection {
+		d.Collection.Key = "a"
+	}
+	for i := 0; i < r.TagsWanted && i < len(r.TagVocab); i++ {
+		d.Tags = append(d.Tags, domain.TagSuggestion{Name: r.TagVocab[i]})
+	}
+	return d, nil
+}
+
+func TestClassifierThatCannotInventTagsStillGetsTagRoom(t *testing.T) {
+	e := newEnv(t)
+	c := &vocabOnly{}
+	e.rebuild(func(d *Deps) { d.Classifier = c })
+	e.provider.Add(domain.Bookmark{ID: bm1, URL: "https://example.test/1", Title: "T", Description: longText, Collection: colA, Tags: []string{"mine"}})
+
+	// A tags-only run is the case the override turned into a no-op.
+	opts := options(TriggerWebhook)
+	opts.TagsOnly = true
+	if _, err := e.pipe.Process(context.Background(), WorkItem{Bookmark: bm1}, opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.got) != 1 || c.got[0].TagsWanted != 4 {
+		t.Fatalf("requests = %+v, want one with TagsWanted 4", c.got)
+	}
+	b, _ := e.provider.Bookmark(bm1)
+	if !slices.Equal(b.Tags, []string{"mine", "go", "agents"}) {
+		t.Fatalf("tags = %q", b.Tags)
+	}
+}
+
+func TestExistingSpellingWinsOverSeparators(t *testing.T) {
+	e := newEnv(t)
+	e.cls.Script(cfake.Result{Decision: decision("a", 0.9, "system-design", "machine_learning")})
+	e.provider.Add(domain.Bookmark{ID: bm1, URL: "https://example.test/1", Title: "T", Description: longText, Collection: colA, Tags: []string{"System Design"}})
+	opts := options(TriggerBackfill)
+	opts.Vocab = taxonomy.NewRunVocab([]string{"System Design", "machine learning"}, nil, true)
+	if _, err := e.pipe.Process(context.Background(), WorkItem{Bookmark: bm1}, opts); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := e.provider.Bookmark(bm1)
+	if !slices.Equal(b.Tags, []string{"System Design", "machine learning"}) {
+		t.Fatalf("tags = %q, want no second spelling", b.Tags)
+	}
+}
+
+func TestMaxTagsAloneSetsTagRoom(t *testing.T) {
+	five := []string{"t1", "t2", "t3", "t4", "t5"}
+	t.Run("max_tags above five leaves room", func(t *testing.T) {
+		e := newEnv(t)
+		e.provider.Add(domain.Bookmark{ID: bm1, URL: "https://example.test/1", Title: "T", Description: longText, Collection: colA, Tags: five})
+		opts := options(TriggerBackfill)
+		opts.Taxonomy.Rules.MaxTags = 7
+		e.cls.Script(cfake.Result{Decision: decision("a", 0.9, "go", "agents", "extra")})
+		opts.Vocab = taxonomy.NewRunVocab([]string{"go", "agents", "extra"}, nil, true)
+		if _, err := e.pipe.Process(context.Background(), WorkItem{Bookmark: bm1}, opts); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := e.provider.Bookmark(bm1)
+		if !slices.Equal(b.Tags, []string{"t1", "t2", "t3", "t4", "t5", "go", "agents"}) {
+			t.Fatalf("tags = %q", b.Tags)
+		}
+	})
+	t.Run("at max_tags nothing is added", func(t *testing.T) {
+		e := newEnv(t)
+		e.provider.Add(domain.Bookmark{ID: bm1, URL: "https://example.test/1", Title: "T", Description: longText, Collection: colA, Tags: five})
+		if _, err := e.pipe.Process(context.Background(), WorkItem{Bookmark: bm1}, options(TriggerBackfill)); err != nil {
+			t.Fatal(err)
+		}
+		if w := e.provider.Writes(); len(w) != 0 {
+			t.Fatalf("writes = %+v", w)
+		}
+	})
 }

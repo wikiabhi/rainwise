@@ -111,8 +111,13 @@ func (c *Classifier) Classify(ctx context.Context, r ports.ClassifyRequest) (dom
 	}
 	d := res.Decision
 	d.Tags = slices.Clone(d.Tags)
-	if r.TagsWanted == 0 || !caps.ProposeTags {
+	switch {
+	case r.TagsWanted == 0:
 		d.Tags = nil
+	case !caps.ProposeTags: // It can't invent tags, but it can choose from the vocabulary.
+		d.Tags = slices.DeleteFunc(d.Tags, func(t domain.TagSuggestion) bool {
+			return !slices.Contains(r.TagVocab, t.Name)
+		})
 	}
 	if !r.WantCollection {
 		d.Collection = domain.CollectionChoice{}

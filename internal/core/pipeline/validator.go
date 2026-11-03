@@ -8,10 +8,7 @@ import (
 	"github.com/wikiabhi/rainwise/internal/domain"
 )
 
-const (
-	roleReview        = "review"
-	tagsLockThreshold = 5 // a bookmark with this many tags gets none added
-)
+const roleReview = "review"
 
 // ValidateInput is a classifier decision plus the context to check it against.
 // Resolved maps taxonomy collection keys to provider collection IDs.
@@ -130,10 +127,7 @@ func validateProposal(in ValidateInput, v *Validated) {
 func validateTags(in ValidateInput, v *Validated) {
 	rules := in.Taxonomy.Rules
 	existing := in.Bookmark.Tags
-	room := max(0, rules.MaxTags-len(existing))
-	if len(existing) >= tagsLockThreshold {
-		room = 0
-	}
+	room := tagRoom(existing, rules)
 	vocab := in.Vocab
 	if vocab == nil {
 		vocab = taxonomy.NewRunVocab(existing, rules.TagAliases, rules.AllowNewTags)
