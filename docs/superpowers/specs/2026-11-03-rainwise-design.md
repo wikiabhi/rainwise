@@ -86,7 +86,7 @@ Milestone 0 is a short spike against live services. Each item has a fallback, so
 
 | # | Unknown | Fallback |
 |---|---|---|
-| 1 | Does `lastUpdate:` work through the API `search` parameter? | Full scan each sync. 5,000 bookmarks is 100 requests. |
+| 1 | Does `lastUpdate:` work through the API `search` parameter? | Full list each sync, with no per-bookmark reads when nothing changed. 5,000 bookmarks is 100 requests. |
 | 2 | Do API writes bump `lastUpdate`? | The input hash makes this harmless either way. |
 | 3 | Which fields do IFTTT triggers expose? Is the bookmark ID included? | The canonical payload accepts a URL, which is resolved through search. |
 | 4 | Is there a Raindrop tag-list endpoint, and is it usable? | Build the vocabulary from listed bookmarks. |
@@ -146,6 +146,7 @@ type Bookmark struct {
     CreatedAt   time.Time
     UpdatedAt   time.Time
     Metadata    map[string]string // opaque to core
+    Highlights  []Highlight       // when the read included them; nil means it didn't say
 }
 
 type Highlight struct {
@@ -518,7 +519,7 @@ The third row is deliberate: Needs Review doesn't pull a bookmark out of a good 
 
 `pipeline.Process(ctx, WorkItem, Options)` is the one code path for all triggers. `Options` carries `MoveAllowed`, `DryRun`, `Force`, and taxonomy.
 
-1. Resolve the provider. Fetch the bookmark and its highlights. If gone, mark it deleted and stop.
+1. Resolve the provider. Fetch the bookmark and its highlights. If gone, mark it deleted and stop. Sync, backfill and reclassify use the copy they just listed, unless it disagrees with the recorded collection or a write is pending; then they read it afresh.
 2. Load state and detect manual moves (section 10).
 3. Compute the input hash. Skip if already handled.
 4. Decide whether a collection decision is wanted. Fetch content if needed (section 9.6).
@@ -569,10 +570,12 @@ Scheduled and also the safety net for webhooks. Runs under the built-in schedule
 
 1. Read the watermark. List bookmarks with `Since = watermark - 48h`, or do a full list if `IncrementalSince` is false.
 2. Run each through the pipeline. The input hash removes repeats, including those caused by our own writes.
-3. Read recent highlights, if supported, and queue tags-only runs for parents with new highlights.
-4. Advance the watermark to the job's start time only on success.
+3. Find recent highlights, if supported, and queue tags-only runs for parents with new highlights. A full listing that includes each bookmark's highlights shows them. Otherwise read the highlight feed.
+4. Advance the watermark to the job's start time. An incremental listing does this only if no item failed; a full listing does it whenever it completes, because the next one revisits failed items.
 
-**Baseline:** a first sync with no watermark records bookmarks outside the inbox as known and pinned with source `baseline`, without classifying them. Only inbox items are processed. This prevents a surprise bill and tag changes **(design call)**. Section 9.1a covers how backfills treat these pins.
+The tag vocabulary is the persisted one. A backfill refreshes it, sync builds it only if it is absent, and real runs append the new tags they write.
+
+**Baseline:** a first sync records bookmarks outside the inbox as known and pinned with source `baseline`, without classifying them. Only inbox items are processed. This prevents a surprise bill and tag changes **(design call)**. The first completed listing ends the baseline, whatever its item failures, as recorded in the `sync_baseline_done` setting. Section 9.1a covers how backfills treat these pins.
 
 Sync doesn't re-sort on taxonomy changes. That's what `reclassify` is for, so costs stay predictable.
 

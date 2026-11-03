@@ -7,6 +7,8 @@ server:
   api_token: ${RAINWISE_API_TOKEN}
 
 state:
+  # /data is where the Docker image keeps its volume. For a local run outside
+  # Docker, point this somewhere writable, such as ./rainwise.db.
   sqlite_path: /data/rainwise.db
   # How long a real backfill or reclassify waits after committing its snapshot,
   # so a replicator can copy it off the machine. 0s is right for a normal disk

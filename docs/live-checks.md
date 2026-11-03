@@ -25,7 +25,7 @@ curl -s -H "Authorization: Bearer $RAINDROP_TOKEN" \
 Compare `count` and the `lastUpdate` fields against an unfiltered call, using a date after most of your bookmarks were edited.
 
 - Fewer results, all newer than the date: it works. Set `providers.raindrop.incremental_since: true`. Sync then lists only what changed since the last run, minus 48 hours.
-- Same results as unfiltered, or an error: leave it `false`. Every sync scans the whole library (about 100 requests per 5,000 bookmarks).
+- Same results as unfiltered, or an error: leave it `false`. Every sync lists the whole library (about 100 requests per 5,000 bookmarks, if check F holds).
 
 Note the filter has one-day granularity, which is why sync backs off 48 hours.
 
@@ -52,7 +52,7 @@ curl -s -H "Authorization: Bearer $RAINDROP_TOKEN" https://api.raindrop.io/rest/
 
 Expect `{"items":[{"_id":"tag","count":N}, ...]}`. Rainwise's adapter calls `GET /tags`, so this check also answers whether `GET /tags` works.
 
-- Works, counts look right: set `providers.raindrop.tag_listing: true`. The tag vocabulary then comes from this endpoint.
+- Works, counts look right: set `providers.raindrop.tag_listing: true`. Backfills and webhook items then take the tag vocabulary from this endpoint. Sync uses the saved vocabulary.
 - Fails or counts are missing: leave it `false`. The vocabulary is built from listed bookmarks.
 
 ### [ ] 5. Can Jev be reached through OpenRouter or a Cloudflare route?
@@ -124,6 +124,20 @@ Rainwise treats a 2xx with `"result":false` as a failed write, and as not found 
 
 - A 4xx, or `"result":false`: fine, the write is reported as failed.
 - A 200 with `"result":true` and the bookmark left alone or sent elsewhere: the write looks successful when it isn't. Keep taxonomy collections from being deleted while Rainwise runs, and report it as a bug to fix in the adapter.
+
+### [ ] F. Do list responses include highlights the way a single read does?
+
+```sh
+curl -s -H "Authorization: Bearer $RAINDROP_TOKEN" "https://api.raindrop.io/rest/v1/raindrops/0?perpage=50" \
+  | jq '[.items[] | {id: ._id, highlights: (if has("highlights") then (.highlights | length) else "absent" end)}]'
+curl -s -H "Authorization: Bearer $RAINDROP_TOKEN" https://api.raindrop.io/rest/v1/raindrop/BOOKMARK_ID | jq .item.highlights
+```
+
+Use a bookmark with highlights, one without, and compare the first output with the second.
+
+- Every item has the field, and the highlights match: an idle sync makes only list requests, and new highlights are found in them without paging `/highlights`. Nothing to set.
+- The field is absent on some or all items: still correct, because absent is read as "unknown". Each such bookmark costs one more GET per sync, and sync pages `/highlights`. If every item lacks it, 5,000 bookmarks take over 50 minutes at the default 100 requests per minute, which won't fit `sync_every: 30m`. Use a longer interval, or set `incremental_since` if check 1 passes.
+- The field is present but incomplete, for example empty on a bookmark with highlights: new highlights would be missed, and their text left out of classification. Report it as a bug to fix in the adapter.
 
 ## Part 3: definition-of-done checks (design section 16)
 

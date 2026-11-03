@@ -36,7 +36,7 @@ H="Authorization: Bearer $RAINWISE_API_TOKEN"; U=http://localhost:8080
 
 ## Recommended sequence
 
-Nothing in this sequence changes your library until step 3.
+Nothing in this sequence changes your library until step 5.
 
 1. **Snapshot export (optional but wise).** Take a snapshot job and download it: `POST /v1/jobs {"type":"snapshot"}`, then `GET /v1/snapshots/{id}/export`. Keep the file off the machine.
 
@@ -53,6 +53,8 @@ Nothing in this sequence changes your library until step 3.
 
 4. **Correct the plan by moving bookmarks by hand.** There are no per-item edit routes. A dry run records where each bookmark currently is. If you move one in Raindrop afterwards, the apply job detects a manual move, drops the planned move and keeps that bookmark where you put it (its tag decision still applies). Tags themselves are corrected in the next step.
 
+   A decision's target may read `planned:<key>`, such as `planned:recipes`. That is a taxonomy collection that doesn't exist yet: the apply job creates it and uses the real one.
+
 5. **Apply.** Apply the reviewed plan as a whole, and say which new tags you approve. `approved_new_tags` maps each proposed tag to its final form; anything left out is rejected:
 
    ```sh
@@ -63,6 +65,8 @@ Nothing in this sequence changes your library until step 3.
    ```
 
    The apply job takes a snapshot first and waits until it is durable, creates any missing taxonomy collections (`provision_missing_collections`), and then works from the saved plan without classifying again. **An apply job stays within the plan.** It adds only existing tags plus the approved ones. A bookmark whose title, description, URL or highlights have changed since the dry run is classified again, and a bookmark you moved after the dry run is left alone. Without `from_dry_run`, a real backfill classifies afresh and adds existing tags only.
+
+   **Until a whole-library real backfill has completed, a real backfill without `from_dry_run` may move bookmarks you moved by hand. Apply through `from_dry_run` to keep corrections.**
 
 6. **Inspect.** Look at the library, `GET /v1/jobs/{id}` for counts, and the decisions for what was applied. Old collections are left in place, even when empty. Rainwise never deletes collections or tags, except when a restore removes empty collections it created.
 
@@ -76,13 +80,17 @@ Nothing in this sequence changes your library until step 3.
 - **On:** scheduled syncs and webhook events write without a dry run. Set `automation.enabled: true` and, if you want the built-in timer, `scheduler.enabled: true` with `sync_every`.
 - Explicit `backfill`, `reclassify`, `snapshot` and `restore` jobs count as opt-in themselves and work either way.
 
-A first sync with no watermark records bookmarks outside the inbox as known and pinned (source `baseline`) without classifying them, so turning it on does not reshuffle an existing library. Only inbox items (Unsorted) are filed. A bookmark you save straight into a collection is treated as filed on purpose, and gets tags only.
+A first sync records bookmarks outside the inbox as known and pinned (source `baseline`) without classifying them, so turning it on does not reshuffle an existing library. Only inbox items (Unsorted) are filed. A bookmark you save straight into a collection is treated as filed on purpose, and gets tags only. A bookmark that fails during a sync is tried again by a later one, and doesn't hold up the others. The exception is the tags-only run for a new highlight: unless `incremental_since` is on, a failed run isn't retried, and those tags are lost until a reclassify covers the bookmark.
+
+A sync with nothing new costs one listing request per 50 bookmarks (about 100 requests, or a minute at the default rate limit, for 5,000), plus a couple for collections. That relies on Raindrop's list responses including highlights, which is [live check F](docs/live-checks.md); if they don't, sync falls back to one more request per bookmark and pages the highlight feed. The tag vocabulary a sync offers the classifier is saved from the last backfill, or from the first sync if there was no backfill, plus the new tags Rainwise has written since. Tags you add by hand join it at the next backfill.
+
+Changes filed by a webhook are recorded in the logs only, not in `/decisions`, because they don't belong to a job.
 
 Sync never re-sorts after a taxonomy change; that is what `reclassify` (with a required `scope`) is for. Bookmarks in Needs Review whose content changes are classified again.
 
 ### Manual moves are final
 
-Any move you make by hand is detected and pinned, including a move out of Needs Review or into Unsorted. The first backfill may move anything you had not pinned before it started; later backfills and reclassify respect your pins (reclassify can override with `include_pinned`). Low confidence sends a bookmark to Needs Review only if it is not already in an allowed collection.
+Any move you make by hand is detected and pinned, including a move out of Needs Review or into Unsorted. Later backfills and reclassify keep those moves (reclassify can override this with `include_pinned`). The exception is step 5 above: until a whole-library real backfill has completed, a real backfill without `from_dry_run` may undo them. Low confidence sends a bookmark to Needs Review only if it is not already in an allowed collection.
 
 ## Restore and undo
 
@@ -95,6 +103,8 @@ curl -s -X POST $U/v1/jobs -H "$H" -H 'Content-Type: application/json' \
 ```
 
 Run the dry run first and read its differences. Then repeat without `dry_run`. A restore sets each bookmark's collection and exact tag list, **overwrites manual changes made since the snapshot** for bookmarks in it, skips bookmarks deleted since and leaves ones created since alone. Empty collections Rainwise created are deleted. A restore takes its own snapshot first, so it can itself be undone by restoring that one.
+
+Sync skips restored bookmarks, so they stay as restored until a backfill or a reclassify covers them.
 
 ## Privacy
 
