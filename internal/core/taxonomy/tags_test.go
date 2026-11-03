@@ -60,3 +60,37 @@ func TestRunVocabResolve(t *testing.T) {
 		t.Errorf("closed vocab Resolve = %q,%v,%v", f, n, ok)
 	}
 }
+
+func TestExistingIgnoresRunNewTagsAndDoesNotMutate(t *testing.T) {
+	v := NewRunVocab([]string{"LLM"}, map[string]string{"k8s": "go"}, true)
+	if got, ok := v.Existing("llms"); !ok || got != "LLM" {
+		t.Errorf("Existing(llms) = %q, %v", got, ok)
+	}
+	if _, ok := v.Existing("brand-new"); ok {
+		t.Error("unknown tag reported as existing")
+	}
+	if len(v.ProposedCounts()) != 0 {
+		t.Errorf("Existing mutated the vocab: %v", v.ProposedCounts())
+	}
+	if _, isNew, ok := v.Resolve("brand-new"); !isNew || !ok {
+		t.Fatal("Resolve should accept a new tag")
+	}
+	if _, ok := v.Existing("brand-new"); ok {
+		t.Error("a tag new this run must not count as existing")
+	}
+}
+
+func TestTermsKeepsOrder(t *testing.T) {
+	v := NewRunVocab([]string{"zeta", "alpha", "Alpha"}, nil, true)
+	v.Resolve("mid")
+	got := v.Terms()
+	want := []string{"zeta", "alpha", "mid"}
+	if len(got) != len(want) {
+		t.Fatalf("Terms() = %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Terms() = %v; want %v", got, want)
+		}
+	}
+}

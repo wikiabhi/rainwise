@@ -49,6 +49,7 @@ type RunVocab struct {
 	aliases  map[string]string
 	allowNew bool
 	byKey    map[string]string
+	order    []string // every term in byKey, oldest first
 	newKeys  map[string]bool
 	proposed map[string]int
 }
@@ -68,6 +69,7 @@ func NewRunVocab(existing []string, aliases map[string]string, allowNew bool) *R
 		k := ComparisonKey(e)
 		if _, ok := v.byKey[k]; !ok {
 			v.byKey[k] = e
+			v.order = append(v.order, e)
 		}
 	}
 	return v
@@ -94,9 +96,34 @@ func (v *RunVocab) Resolve(tag string) (final string, isNew, ok bool) {
 		return "", false, false
 	}
 	v.byKey[k] = n
+	v.order = append(v.order, n)
 	v.newKeys[k] = true
 	v.proposed[n]++
 	return n, true, true
+}
+
+// Existing looks a tag up in the vocabulary the run started with, returning its
+// existing spelling. Tags accepted during the run don't count. It changes nothing.
+func (v *RunVocab) Existing(tag string) (string, bool) {
+	n := Normalize(tag, v.aliases)
+	if n == "" {
+		return "", false
+	}
+	k := ComparisonKey(n)
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	f, found := v.byKey[k]
+	if !found || v.newKeys[k] {
+		return "", false
+	}
+	return f, true
+}
+
+// Terms lists the vocabulary in its original order, then new tags as accepted.
+func (v *RunVocab) Terms() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]string(nil), v.order...)
 }
 
 // ProposedCounts returns each new tag accepted this run with its use count.
