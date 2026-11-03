@@ -394,6 +394,11 @@ func Run(t *testing.T, newStore func(t *testing.T) ports.Store) {
 		if !ok || v != "2" {
 			t.Errorf("got %q %v", v, ok)
 		}
+		must(t, st.DeleteSetting(ctx, "w"))
+		if _, ok, err := st.GetSetting(ctx, "w"); err != nil || ok {
+			t.Errorf("after delete: ok=%v err=%v", ok, err)
+		}
+		must(t, st.DeleteSetting(ctx, "w")) // Deleting what isn't there is fine.
 	})
 
 	t.Run("SnapshotItemsPaging", func(t *testing.T) {

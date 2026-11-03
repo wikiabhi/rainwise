@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/wikiabhi/rainwise/internal/core/pipeline"
@@ -72,6 +73,21 @@ func (d Deps) newScopeMatcher(ctx context.Context, s domain.Scope, t domain.Taxo
 		m.collections = cols
 	}
 	return m, nil
+}
+
+// resolvedScope is s with its collections as the IDs they resolved to. A taxonomy
+// key means nothing without the taxonomy, so this is the spelling that can leave
+// the job: read alone, it covers exactly what this matcher does.
+func (m scopeMatcher) resolvedScope(s domain.Scope) domain.Scope {
+	if m.collections == nil {
+		return s
+	}
+	s.Collections = make([]string, 0, len(m.collections))
+	for id := range m.collections {
+		s.Collections = append(s.Collections, id.String())
+	}
+	slices.Sort(s.Collections)
+	return s
 }
 
 func (d Deps) qualify(s string) domain.ID {

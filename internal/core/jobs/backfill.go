@@ -53,7 +53,7 @@ func (d Deps) runBatch(ctx context.Context, job *domain.Job, rc RunContext, trig
 			}
 		}
 		if !job.DryRun {
-			if err := d.prepareWrites(ctx, job, rc, t); err != nil {
+			if err := d.prepareWrites(ctx, job, rc, t, match); err != nil {
 				return err
 			}
 		}
@@ -190,17 +190,22 @@ func sampleEvenly[T any](all []T, size int) []T {
 }
 
 // prepareWrites does what a real job must before it changes anything: refuse what
-// can't work, then take a snapshot and wait until it's durable (§9.4). A resumed
-// job keeps its snapshot, and waits only if it never got past the wait.
-func (d Deps) prepareWrites(ctx context.Context, job *domain.Job, rc RunContext, t domain.Taxonomy) error {
+// can't work, then take a snapshot of what it will touch (§9.4).
+func (d Deps) prepareWrites(ctx context.Context, job *domain.Job, rc RunContext, t domain.Taxonomy, match scopeMatcher) error {
 	if err := d.checkCollections(ctx, t); err != nil {
 		return err
 	}
+	return d.takeSnapshot(ctx, job, rc, match.resolvedScope(job.Scope))
+}
+
+// takeSnapshot records scope and waits until that's durable. A resumed job keeps
+// its snapshot, and waits only if it never got past the wait.
+func (d Deps) takeSnapshot(ctx context.Context, job *domain.Job, rc RunContext, scope domain.Scope) error {
 	if job.SnapshotID == "" {
 		if d.Snapshots == nil {
 			return fmt.Errorf("%s needs a snapshot, and no snapshot taker is configured: %w", job.Type, domain.ErrValidation)
 		}
-		id, err := d.Snapshots.Take(ctx, job.Provider, job.Scope, job.ID)
+		id, err := d.Snapshots.Take(ctx, job.Provider, scope, job.ID)
 		if err != nil {
 			return fmt.Errorf("take snapshot: %w", err)
 		}

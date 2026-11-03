@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -268,4 +269,13 @@ func newJobID(now time.Time) (string, error) {
 		return "", fmt.Errorf("job id: %w", err)
 	}
 	return "job_" + idEncoding.EncodeToString(b[:]), nil
+}
+
+// newSnapshotID is time-prefixed in the same way.
+func newSnapshotID(now time.Time) (string, error) {
+	id, err := newJobID(now)
+	if err != nil {
+		return "", err
+	}
+	return "snap_" + strings.TrimPrefix(id, "job_"), nil
 }

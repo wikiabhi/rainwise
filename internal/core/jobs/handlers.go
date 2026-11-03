@@ -37,7 +37,8 @@ type SnapshotTaker interface {
 }
 
 // Deps are what the job handlers work with. Proposer is needed only for dynamic
-// taxonomies, and Snapshots only for real backfills and reclassifies.
+// taxonomies, and Snapshots only for snapshots, restores, and real backfills and
+// reclassifies.
 type Deps struct {
 	Provider     ports.Provider
 	Pipeline     *pipeline.Pipeline
@@ -67,6 +68,8 @@ func Handlers(d Deps) map[domain.JobType]Handler {
 		domain.JobSync:       syncJob{d},
 		domain.JobBackfill:   backfillJob{d},
 		domain.JobReclassify: reclassifyJob{d},
+		domain.JobSnapshot:   snapshotJob{d},
+		domain.JobRestore:    restoreJob{d},
 	}
 }
 

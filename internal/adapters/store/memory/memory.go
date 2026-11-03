@@ -373,6 +373,13 @@ func (s *stateStore) PutSetting(_ context.Context, key, value string) error {
 	return nil
 }
 
+func (s *stateStore) DeleteSetting(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.settings, key)
+	return nil
+}
+
 // ---- snapshots ----
 
 type snapStore store

@@ -66,7 +66,12 @@ func TestReclassifyScope(t *testing.T) {
 			if job.Progress.Processed != len(c.want) || job.Progress.Total != len(c.want) {
 				t.Errorf("progress = %+v", job.Progress)
 			}
-			if len(e.snaps.calls) != 1 || !reflect.DeepEqual(e.snaps.calls[0], c.scope) || e.snaps.jobs[0] != job.ID {
+			// However a collection was named, the snapshot gets the IDs it resolved to.
+			wantScope := c.scope
+			if len(wantScope.Collections) > 0 {
+				wantScope.Collections = []string{colBeta.String()}
+			}
+			if len(e.snaps.calls) != 1 || !reflect.DeepEqual(e.snaps.calls[0], wantScope) || e.snaps.jobs[0] != job.ID {
 				t.Errorf("snapshot calls = %+v", e.snaps.calls)
 			}
 			if job.SnapshotID == "" {

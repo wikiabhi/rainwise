@@ -125,6 +125,12 @@ func New(d Deps) *Pipeline {
 	return &Pipeline{d: d, locks: map[domain.ID]*bookmarkLock{}}
 }
 
+// LockBookmark holds the per-bookmark lock for work done outside Process, until
+// the returned function is called. It gives up when ctx ends.
+func (p *Pipeline) LockBookmark(ctx context.Context, id domain.ID) (func(), error) {
+	return p.lock(ctx, id)
+}
+
 // lock serializes work on one bookmark, and gives up when ctx ends.
 func (p *Pipeline) lock(ctx context.Context, id domain.ID) (func(), error) {
 	p.locksMu.Lock()
@@ -1017,6 +1023,36 @@ func (p *Pipeline) loadCreated(ctx context.Context, t domain.Taxonomy) ([]create
 		return nil, fmt.Errorf("parse created collections: %w", err)
 	}
 	return out, nil
+}
+
+// ForgetCreated drops collections that no longer exist from those auto-created for
+// a taxonomy, so that they aren't offered to classifiers or counted against the cap.
+func (p *Pipeline) ForgetCreated(ctx context.Context, taxonomyID string, gone map[domain.ID]bool) error {
+	p.createMu.Lock()
+	defer p.createMu.Unlock()
+
+	t := domain.Taxonomy{ID: taxonomyID}
+	created, err := p.loadCreated(ctx, t)
+	if err != nil {
+		return err
+	}
+	kept := make([]createdCollection, 0, len(created))
+	for _, c := range created {
+		if !gone[c.ID] {
+			kept = append(kept, c)
+		}
+	}
+	if len(kept) == len(created) {
+		return nil
+	}
+	raw, err := json.Marshal(kept)
+	if err != nil {
+		return fmt.Errorf("encode created collections: %w", err)
+	}
+	if err := p.d.Store.BookmarkStates().PutSetting(ctx, p.createdSetting(t), string(raw)); err != nil {
+		return fmt.Errorf("save created collections: %w", err)
+	}
+	return nil
 }
 
 // effectiveTaxonomy adds auto-created collections to the caller's taxonomy, so

@@ -45,6 +45,8 @@ type StateStore interface {
 	PutState(ctx context.Context, s domain.BookmarkState) error
 	GetSetting(ctx context.Context, key string) (string, bool, error)
 	PutSetting(ctx context.Context, key, value string) error
+	// DeleteSetting removes a setting, if there is one.
+	DeleteSetting(ctx context.Context, key string) error
 }
 
 type SnapshotStore interface {

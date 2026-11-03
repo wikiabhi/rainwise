@@ -65,6 +65,7 @@ type DecisionRecord struct {
 	TargetCollection   *ID        `json:"target_collection,omitempty"`
 	AddTags            []string   `json:"add_tags"`
 	NewTags            []string   `json:"new_tags,omitempty"` // Dry runs: the AddTags outside the existing vocabulary.
+	SetTags            []string   `json:"set_tags,omitempty"` // Restores: the exact tags the bookmark gets.
 	Decision           Decision   `json:"decision"`
 	Reason             string     `json:"reason"`
 	Result             string     `json:"result"`
