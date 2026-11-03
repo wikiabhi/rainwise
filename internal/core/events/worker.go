@@ -403,6 +403,16 @@ func (w *Worker) moved(ctx context.Context, id domain.ID) error {
 	return w.process(ctx, pipeline.WorkItem{Bookmark: id}, true)
 }
 
+// awaitsFiling reports a bookmark in the inbox, or with no collection on a provider
+// that has no inbox.
+func (w *Worker) awaitsFiling(b domain.Bookmark) bool {
+	inbox := w.d.Provider.Capabilities().InboxCollection
+	if inbox == nil {
+		return b.Collection.IsZero()
+	}
+	return b.Collection == *inbox
+}
+
 func (w *Worker) pinIfMoved(ctx context.Context, id domain.ID) (bool, error) {
 	b, err := w.d.Provider.GetBookmark(ctx, id)
 	if errors.Is(err, domain.ErrNotFound) {
@@ -419,6 +429,15 @@ func (w *Worker) pinIfMoved(ctx context.Context, id domain.ID) (bool, error) {
 	}
 	if !known {
 		st = domain.BookmarkState{ID: id}
+		// There's no earlier location to have moved from, and an unsorted bookmark
+		// isn't a choice the user made. A pin would stop sync from ever filing it.
+		if w.awaitsFiling(b) {
+			st.KnownCollection, st.KnownTags = b.Collection, b.Tags
+			if err := states.PutState(ctx, st); err != nil {
+				return false, fmt.Errorf("save state of %s: %w", id, err)
+			}
+			return false, nil
+		}
 	}
 	if !pipeline.DetectManualMove(&st, b, w.d.Now()) {
 		return false, nil

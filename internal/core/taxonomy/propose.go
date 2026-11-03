@@ -59,6 +59,9 @@ func Propose(ctx context.Context, p ports.TaxonomyProposer, samples []ports.Subj
 		key := uniqueKey(name, keys)
 		cols = append(cols, domain.TaxonomyCollection{Key: key, Name: name, Description: c.Description})
 	}
+	if len(cols) == 0 {
+		return domain.Taxonomy{}, fmt.Errorf("propose taxonomy %q: no usable collections: %w", t.ID, domain.ErrInvalidOutput)
+	}
 	t.Collections = append(cols, reviews...)
 	return t, nil
 }

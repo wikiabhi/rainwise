@@ -651,3 +651,49 @@ func TestLowConfidenceHighlightAddsNoTags(t *testing.T) {
 		t.Error("event not done")
 	}
 }
+
+func TestMovedUnseenBookmark(t *testing.T) {
+	t.Run("in the inbox it isn't pinned, and sync can still file it", func(t *testing.T) {
+		e := newEnv(t)
+		e.provider.Add(inbox())
+		e.ingest(e.event(domain.EventBookmarkMoved, ref("1")))
+		e.tick(e.worker(e.provider, true))
+
+		st := e.state()
+		if st.PinSource != domain.PinNone || st.PinnedAt != nil || st.KnownCollection != pfake.Inbox {
+			t.Fatalf("state = %+v", st)
+		}
+		if e.cls.Calls() != 0 {
+			t.Errorf("classifier calls = %d", e.cls.Calls())
+		}
+		want := pipeline.EvaluateMove(st, true, inbox(), e.provider.Capabilities().InboxCollection, pipeline.Options{Trigger: pipeline.TriggerSync})
+		if !want {
+			t.Error("sync wouldn't file it")
+		}
+	})
+	t.Run("outside the inbox it is pinned", func(t *testing.T) {
+		e := newEnv(t)
+		b := inbox()
+		b.Collection = colB
+		e.provider.Add(b)
+		e.ingest(e.event(domain.EventBookmarkMoved, ref("1")))
+		e.tick(e.worker(e.provider, false))
+		if st := e.state(); st.PinSource != domain.PinUser || st.KnownCollection != colB {
+			t.Fatalf("state = %+v", st)
+		}
+	})
+	t.Run("a provider without an inbox pins only what has a collection", func(t *testing.T) {
+		e := newEnv(t)
+		caps := e.provider.Capabilities()
+		caps.InboxCollection = nil
+		e.provider.SetCapabilities(caps)
+		b := inbox()
+		b.Collection = domain.ID{}
+		e.provider.Add(b)
+		e.ingest(e.event(domain.EventBookmarkMoved, ref("1")))
+		e.tick(e.worker(e.provider, false))
+		if st := e.state(); st.PinSource != domain.PinNone {
+			t.Fatalf("state = %+v", st)
+		}
+	})
+}

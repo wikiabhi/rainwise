@@ -102,6 +102,19 @@ func TestCreateValidation(t *testing.T) {
 			r.Type = domain.JobReclassify
 			r.Scope = domain.Scope{Tags: []string{"x"}}
 		}), nil},
+		{"propose_only on a real backfill", mod(func(r *CreateRequest) { r.Params.ProposeOnly = true }), domain.ErrValidation},
+		{"propose_only on a dry-run sync", mod(func(r *CreateRequest) {
+			r.Type = domain.JobSync
+			r.DryRun = true
+			r.Params.ProposeOnly = true
+		}), domain.ErrValidation},
+		{"propose_only on a dry-run reclassify", mod(func(r *CreateRequest) {
+			r.Type = domain.JobReclassify
+			r.DryRun = true
+			r.Scope = domain.Scope{Tags: []string{"x"}}
+			r.Params.ProposeOnly = true
+		}), domain.ErrValidation},
+		{"propose_only on a dry-run backfill", mod(func(r *CreateRequest) { r.DryRun = true; r.Params.ProposeOnly = true }), nil},
 		{"restore needs no taxonomy", CreateRequest{Type: domain.JobRestore, Provider: "p", Params: domain.JobParams{SnapshotID: "s1"}}, nil},
 		{"snapshot needs no taxonomy", CreateRequest{Type: domain.JobSnapshot, Provider: "p"}, nil},
 	}

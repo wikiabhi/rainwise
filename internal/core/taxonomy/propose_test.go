@@ -144,3 +144,26 @@ func TestPropose(t *testing.T) {
 		}
 	})
 }
+
+func TestProposeNothingUsableIsInvalid(t *testing.T) {
+	withReview := draft(5)
+	withReview.Collections = []domain.TaxonomyCollection{{Key: "r", Name: "Later", Role: roleReview}}
+	cases := []struct {
+		name string
+		t    domain.Taxonomy
+		out  []domain.CollectionProposal
+	}{
+		{"nothing proposed", draft(5), nil},
+		{"only blank names", draft(5), proposals("  ")},
+		{"only the review collection", draft(5), proposals("needs review")},
+		{"only the existing review name", withReview, proposals("LATER")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Propose(context.Background(), &stubProposer{out: c.out}, nil, nil, c.t)
+			if !errors.Is(err, domain.ErrInvalidOutput) {
+				t.Fatalf("err = %v, want ErrInvalidOutput", err)
+			}
+		})
+	}
+}

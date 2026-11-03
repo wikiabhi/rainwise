@@ -112,6 +112,9 @@ func parseDecision(content string, r ports.ClassifyRequest) (domain.Decision, er
 			Key:          strings.TrimSpace(raw.Collection),
 			ProposedName: strings.TrimSpace(raw.ProposedName),
 		}
+		if k := d.Collection.Key; k != "" && !knownCollection(r, k) {
+			return domain.Decision{}, invalid("collection %q is not in the taxonomy", k)
+		}
 	}
 	if r.TagsWanted > 0 {
 		for _, t := range raw.Tags {
@@ -121,6 +124,17 @@ func parseDecision(content string, r ports.ClassifyRequest) (domain.Decision, er
 		}
 	}
 	return d, nil
+}
+
+// knownCollection matches a collection's key or name, ignoring case. The review
+// collection counts: the schema doesn't offer it, but choosing it is a fair answer.
+func knownCollection(r ports.ClassifyRequest, s string) bool {
+	for _, c := range r.Taxonomy.Collections {
+		if strings.EqualFold(c.Key, s) || strings.EqualFold(c.Name, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseProposals(content string) ([]domain.CollectionProposal, error) {

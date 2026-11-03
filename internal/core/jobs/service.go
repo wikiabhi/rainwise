@@ -143,6 +143,9 @@ func (s *Service) validate(ctx context.Context, req CreateRequest) error {
 			return fmt.Errorf("taxonomy %q is a draft, so only dry runs can use it: %w", req.Taxonomy, domain.ErrConflict)
 		}
 	}
+	if req.Params.ProposeOnly && (req.Type != domain.JobBackfill || !req.DryRun) {
+		return fmt.Errorf("propose_only needs a dry-run backfill: %w", domain.ErrValidation)
+	}
 	if req.FromDryRun != "" {
 		return s.validatePlan(ctx, req)
 	}

@@ -215,10 +215,12 @@ func TestParseCodeFence(t *testing.T) {
 
 func TestInvalidOutput(t *testing.T) {
 	cases := map[string]string{
-		"malformed":          `{"collection": `,
-		"confidence too big": `{"collection":"dev","proposed_name":"","tags":[],"confidence":1.5,"reasoning":""}`,
-		"missing confidence": `{"collection":"dev","proposed_name":"","tags":[],"reasoning":""}`,
-		"empty":              ``,
+		"malformed":                   `{"collection": `,
+		"confidence too big":          `{"collection":"dev","proposed_name":"","tags":[],"confidence":1.5,"reasoning":""}`,
+		"missing confidence":          `{"collection":"dev","proposed_name":"","tags":[],"reasoning":""}`,
+		"empty":                       ``,
+		"unknown collection":          `{"collection":"gardening","proposed_name":"","tags":[],"confidence":0.8,"reasoning":""}`,
+		"unknown key with a proposal": `{"collection":"gardening","proposed_name":"Gardening","tags":[],"confidence":0.8,"reasoning":""}`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -436,4 +438,32 @@ func TestConformance(t *testing.T) {
 	defer srv.Close()
 	c := New(Config{Name: "llm", BaseURL: srv.URL, Model: "m", HTTP: srv.Client()})
 	classifiertest.Run(t, c, func(d domain.Decision) { cur = d })
+}
+
+func TestCollectionAnswersThatStayValid(t *testing.T) {
+	cases := map[string]string{
+		"key":             "dev",
+		"key, other case": "DEV",
+		"name":            "cooking",
+		"review key":      "needs_review",
+		"review name":     "Needs Review",
+		"none":            "",
+	}
+	for name, key := range cases {
+		t.Run(name, func(t *testing.T) {
+			b := newBackend(t, reply{Content: fmt.Sprintf(`{"collection":%q,"proposed_name":"","tags":[],"confidence":0.8,"reasoning":""}`, key)})
+			c, _ := newClassifier(b, nil)
+			d, err := c.Classify(context.Background(), request(true, 3))
+			if err != nil || d.Collection.Key != key {
+				t.Fatalf("decision = %+v, err = %v", d, err)
+			}
+		})
+	}
+	t.Run("not asked for", func(t *testing.T) {
+		b := newBackend(t, reply{Content: `{"collection":"gardening","proposed_name":"","tags":[],"confidence":0.8,"reasoning":""}`})
+		c, _ := newClassifier(b, nil)
+		if _, err := c.Classify(context.Background(), request(false, 3)); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
