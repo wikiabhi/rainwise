@@ -112,7 +112,7 @@ type Taxonomy struct {
 	Version          int                  `json:"version" yaml:"version"`
 	Collections      []TaxonomyCollection `json:"collections" yaml:"collections"`
 	Rules            TaxonomyRules        `json:"rules" yaml:"rules"`
-	ProvisionMissing bool                 `json:"provision_missing" yaml:"provision_missing"`
+	ProvisionMissing bool                 `json:"provision_missing" yaml:"provision_missing_collections"`
 	Dynamic          DynamicSettings      `json:"dynamic" yaml:"dynamic"`
 	Proposals        []CollectionProposal `json:"proposals,omitempty" yaml:"proposals"`
 }

@@ -173,3 +173,26 @@ func TestStringRedactsSecrets(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateDynamic(t *testing.T) {
+	head := baseYAML[:strings.Index(baseYAML, "taxonomies:")]
+	tx := func(cols string) string { return head + "taxonomies:\n  default:\n    mode: dynamic\n" + cols }
+
+	cfg, err := load(t, tx("    collections: []\n"))
+	if err != nil {
+		t.Fatalf("empty dynamic taxonomy should load: %v", err)
+	}
+	if got := cfg.Taxonomies["default"].Status; got != "draft" {
+		t.Fatalf("status = %q", got)
+	}
+	if _, err := load(t, tx("")); err != nil {
+		t.Fatalf("omitted collections should load: %v", err)
+	}
+	if _, err := load(t, tx("    collections:\n      - {key: a, name: A}\n")); err == nil || !strings.Contains(err.Error(), "found none") {
+		t.Fatalf("err = %v, want review-missing", err)
+	}
+	two := "    collections:\n      - {key: a, name: A, role: review}\n      - {key: b, name: B, role: review}\n"
+	if _, err := load(t, tx(two)); err == nil || !strings.Contains(err.Error(), "found 2") {
+		t.Fatalf("err = %v, want two-reviews", err)
+	}
+}

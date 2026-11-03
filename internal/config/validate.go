@@ -90,11 +90,15 @@ func validateTaxonomy(id string, t domain.Taxonomy) []error {
 			others++
 		}
 	}
-	switch {
-	case reviews == 0:
-		add("needs exactly one collection with role: review, found none")
-	case reviews > 1:
-		add("needs exactly one collection with role: review, found %d", reviews)
+	// A dynamic taxonomy starts with no collections (§8.3); once it lists
+	// any, the review rule applies.
+	if t.Mode != domain.ModeDynamic || len(t.Collections) > 0 {
+		switch {
+		case reviews == 0:
+			add("needs exactly one collection with role: review, found none")
+		case reviews > 1:
+			add("needs exactly one collection with role: review, found %d", reviews)
+		}
 	}
 	if t.Mode == domain.ModeFixed && others == 0 {
 		add("fixed taxonomy needs at least one collection that is not role: review")
