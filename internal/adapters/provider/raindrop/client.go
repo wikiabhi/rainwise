@@ -172,6 +172,9 @@ func (p *Provider) do(ctx context.Context, method, path string, query url.Values
 			last = fmt.Errorf("raindrop: %s %s: reading response: %w", method, path, domain.ErrTemporary)
 			continue
 		}
+		if err := resultError(method, path, data); err != nil {
+			return err
+		}
 		if out != nil {
 			if err := json.Unmarshal(data, out); err != nil {
 				return fmt.Errorf("raindrop: %s %s: decoding response: %w", method, path, errors.New("malformed JSON"))
@@ -180,6 +183,25 @@ func (p *Provider) do(ctx context.Context, method, path string, query url.Values
 		return nil
 	}
 	return last
+}
+
+// resultError reports a 2xx response whose body says the call failed. A body with
+// no result field passes: not every endpoint is documented to send one. The body's
+// messages only classify the error, and never go into it.
+func resultError(method, path string, data []byte) error {
+	var env struct {
+		Result       *bool           `json:"result"`
+		Error        json.RawMessage `json:"error"`
+		ErrorMessage string          `json:"errorMessage"`
+	}
+	if json.Unmarshal(data, &env) != nil || env.Result == nil || *env.Result {
+		return nil
+	}
+	said := strings.ToLower(string(env.Error) + " " + env.ErrorMessage)
+	if strings.Contains(said, "not found") || strings.Contains(said, "notfound") {
+		return fmt.Errorf("raindrop: %s %s: result false: %w", method, path, domain.ErrNotFound)
+	}
+	return fmt.Errorf("raindrop: %s %s: result false", method, path)
 }
 
 // localID returns the Raindrop-local part of an ID owned by this provider.

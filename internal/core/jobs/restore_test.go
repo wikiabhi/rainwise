@@ -1600,3 +1600,36 @@ func TestRestoreHoldsBookmarkLock(t *testing.T) {
 		t.Errorf("writes = %d", checks)
 	}
 }
+
+// blankWrites answers a write as a broken adapter would: success with an empty bookmark.
+type blankWrites struct{ *listLog }
+
+func (blankWrites) UpdateBookmark(context.Context, domain.ID, ports.BookmarkPatch) (domain.Bookmark, error) {
+	return domain.Bookmark{}, nil
+}
+
+func TestRestoreWriteAnsweredForAnotherBookmarkStaysPending(t *testing.T) {
+	e := sortedEnv(t)
+	snap := e.takeSnapshot(domain.Scope{}).SnapshotID
+	e.syncNow()
+	moved := e.collectionOf(bmID(1))
+	if moved == pfake.Inbox {
+		t.Fatal("sync should have filed it")
+	}
+	e.deps.Provider = blankWrites{e.logged}
+
+	job := e.restoreJob(snap)
+	if err := e.runJob(job); err != nil {
+		t.Fatal(err)
+	}
+	if job.Progress.Failed == 0 {
+		t.Fatalf("progress = %+v", job.Progress)
+	}
+	st := e.state(bmID(1))
+	if st.PendingCollection == nil || *st.PendingCollection != pfake.Inbox {
+		t.Fatalf("pending = %v, want the restore's write still pending", st.PendingCollection)
+	}
+	if st.KnownCollection != moved || st.RestoredAt != nil {
+		t.Fatalf("state recorded the write: %+v", st)
+	}
+}

@@ -1925,3 +1925,30 @@ func TestMaxTagsAloneSetsTagRoom(t *testing.T) {
 		}
 	})
 }
+
+// blankWrites answers a write as a broken adapter would: success with an empty bookmark.
+type blankWrites struct{ *pfake.Provider }
+
+func (blankWrites) UpdateBookmark(context.Context, domain.ID, ports.BookmarkPatch) (domain.Bookmark, error) {
+	return domain.Bookmark{}, nil
+}
+
+func TestWriteAnsweredForAnotherBookmarkStaysPending(t *testing.T) {
+	e := newEnv(t)
+	e.provider.Add(inboxBookmark())
+	e.rebuild(func(d *Deps) { d.Provider = blankWrites{e.provider} })
+	_, err := e.pipe.Process(context.Background(), WorkItem{Bookmark: bm1}, options(TriggerBackfill))
+	if err == nil {
+		t.Fatal("a write answered for a different bookmark counted as done")
+	}
+	st, _, gerr := e.store.BookmarkStates().GetState(context.Background(), bm1)
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	if st.PendingCollection == nil || *st.PendingCollection != colA {
+		t.Fatalf("pending = %v, want the write still pending", st.PendingCollection)
+	}
+	if st.KnownCollection != pfake.Inbox || st.PinSource != domain.PinNone || st.InputHash != "" {
+		t.Fatalf("state recorded the write: %+v", st)
+	}
+}

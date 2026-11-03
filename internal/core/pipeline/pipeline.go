@@ -902,6 +902,11 @@ func (p *Pipeline) abortForMove(ctx context.Context, r *run, cur domain.Bookmark
 
 // complete records a finished item. written means the provider was changed.
 func (p *Pipeline) complete(ctx context.Context, r *run, b domain.Bookmark, status OutcomeStatus, model string, movedByUs, written bool) (Outcome, error) {
+	// An answer about some other bookmark says nothing about this write. What's
+	// pending stays, and the next read settles it.
+	if b.ID != r.rec.Bookmark {
+		return Outcome{}, fmt.Errorf("write bookmark %s: provider answered for %q", r.rec.Bookmark, b.ID)
+	}
 	if written {
 		r.rec.Result = resultApplied
 		applied := r.now

@@ -181,7 +181,7 @@ func TestMapping(t *testing.T) {
 		t.Fatal(err)
 	}
 	if b.ID != rid(42) || b.URL != "https://example.test/42" || b.Title != "T" || b.Excerpt != "ex" ||
-		b.Collection != rid(7) || !slices.Equal(b.Tags, []string{"a", "B"}) || b.Metadata["note"] != "my note" ||
+		b.Collection != rid(7) || !slices.Equal(b.Tags, []string{"a", "B"}) || b.Description != "my note" ||
 		!b.CreatedAt.Equal(time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)) || !b.UpdatedAt.Equal(time.Date(2026, 10, 2, 9, 30, 0, 0, time.UTC)) {
 		t.Fatalf("mapped = %+v", b)
 	}
@@ -500,7 +500,7 @@ func TestResolveURL(t *testing.T) {
 	if err != nil || id != rid(2) {
 		t.Fatalf("%v %v", id, err)
 	}
-	if _, err := p.ResolveURL(context.Background(), "https://example.test/2/"); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := p.ResolveURL(context.Background(), "https://example.test/3"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -585,4 +585,87 @@ func TestConformance(t *testing.T) {
 		p, _ := setup(t, st.ServeHTTP, nil)
 		return p
 	})
+}
+
+func TestResultFalse(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name         string
+		body         map[string]any
+		wantNotFound bool
+	}{
+		{"not found message", map[string]any{"result": false, "errorMessage": "Raindrop not found"}, true},
+		{"not found code", map[string]any{"result": false, "error": "NotFound"}, true},
+		{"numeric error", map[string]any{"result": false, "error": 500, "errorMessage": "collection is locked: secret-detail"}, false},
+		{"bare", map[string]any{"result": false}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			calls := 0
+			p, _ := setup(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				writeJSON(w, c.body)
+			}, nil)
+			col := rid(99)
+			_, err := p.UpdateBookmark(ctx, rid(1), ports.BookmarkPatch{Collection: &col})
+			if err == nil {
+				t.Fatal("a 200 with result:false was taken for success")
+			}
+			if got := errors.Is(err, domain.ErrNotFound); got != c.wantNotFound {
+				t.Fatalf("err = %v, not found = %v", err, got)
+			}
+			if errors.Is(err, domain.ErrTemporary) || calls != 1 {
+				t.Fatalf("retried: err = %v, calls = %d", err, calls)
+			}
+			if strings.Contains(err.Error(), "secret-detail") {
+				t.Fatalf("response body in error: %v", err)
+			}
+		})
+	}
+}
+
+func TestResultFieldOptional(t *testing.T) {
+	p, _ := setup(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		case http.MethodPut:
+			writeJSON(w, map[string]any{"item": item(1, 2)})
+		default:
+			writeJSON(w, map[string]any{"result": true, "items": []any{}})
+		}
+	}, nil)
+	col := rid(2)
+	if b, err := p.UpdateBookmark(context.Background(), rid(1), ports.BookmarkPatch{Collection: &col}); err != nil || b.ID != rid(1) {
+		t.Fatalf("no result field: %v %+v", err, b)
+	}
+	if err := p.do(context.Background(), http.MethodDelete, "/x", nil, nil, nil); err != nil {
+		t.Fatalf("empty body: %v", err)
+	}
+	var out struct {
+		Items []any `json:"items"`
+	}
+	if err := p.do(context.Background(), http.MethodGet, "/x", nil, nil, &out); err != nil {
+		t.Fatalf("result true: %v", err)
+	}
+}
+
+func TestResolveURLTolerantCompare(t *testing.T) {
+	link := "https://Example.test/Post/"
+	p, _ := setup(t, func(w http.ResponseWriter, r *http.Request) {
+		it := item(5, 1)
+		it["link"] = link
+		writeJSON(w, map[string]any{"items": []any{it}})
+	}, nil)
+	for _, in := range []string{"https://example.test/Post", "HTTPS://EXAMPLE.TEST/Post/", link} {
+		if id, err := p.ResolveURL(context.Background(), in); err != nil || id != rid(5) {
+			t.Errorf("ResolveURL(%q) = %v, %v", in, id, err)
+		}
+	}
+	// Paths and queries stay case-sensitive, and other pages don't match.
+	for _, in := range []string{"https://example.test/post", "https://example.test/Post/2", "https://example.test/Post?x=1"} {
+		if _, err := p.ResolveURL(context.Background(), in); !errors.Is(err, domain.ErrNotFound) {
+			t.Errorf("ResolveURL(%q) err = %v", in, err)
+		}
+	}
 }

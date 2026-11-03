@@ -386,6 +386,11 @@ func (r *restoreRun) applied(ctx context.Context, rec domain.DecisionRecord) (pi
 // move, and so sync leaves it alone until a backfill or reclassify (§11). Its pin
 // goes back to what the snapshot recorded, which is what makes a restore undoable.
 func (r *restoreRun) settle(ctx context.Context, b domain.Bookmark, item domain.SnapshotItem) error {
+	// An answer about some other bookmark says nothing about this write. What's
+	// pending stays, and the next read settles it.
+	if b.ID != item.Bookmark {
+		return fmt.Errorf("write bookmark %s: provider answered for %q", item.Bookmark, b.ID)
+	}
 	st, err := r.loadState(ctx, b.ID)
 	if err != nil {
 		return err

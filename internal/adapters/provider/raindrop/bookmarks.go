@@ -49,20 +49,17 @@ func rdID(n int64) domain.ID {
 }
 
 func (r rawItem) bookmark() domain.Bookmark {
-	b := domain.Bookmark{
-		ID:         rdID(r.ID),
-		URL:        r.Link,
-		Title:      r.Title,
-		Excerpt:    r.Excerpt,
-		Tags:       r.Tags,
-		Collection: rdID(r.Collection.ID),
-		CreatedAt:  parseTime(r.Created),
-		UpdatedAt:  parseTime(r.LastUpdate),
+	return domain.Bookmark{
+		ID:          rdID(r.ID),
+		URL:         r.Link,
+		Title:       r.Title,
+		Description: r.Note,
+		Excerpt:     r.Excerpt,
+		Tags:        r.Tags,
+		Collection:  rdID(r.Collection.ID),
+		CreatedAt:   parseTime(r.Created),
+		UpdatedAt:   parseTime(r.LastUpdate),
 	}
-	if r.Note != "" {
-		b.Metadata = map[string]string{"note": r.Note}
-	}
-	return b
 }
 
 func (p *Provider) GetBookmark(ctx context.Context, id domain.ID) (domain.Bookmark, error) {
@@ -208,7 +205,18 @@ func mergeTags(existing, add []string) ([]string, bool) {
 	return out, changed
 }
 
-// ResolveURL finds the bookmark whose link equals rawURL exactly.
+// comparableURL lowercases a URL's scheme and host and drops a trailing slash.
+// Anything else can matter to the server, so it stays as it is.
+func comparableURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if u, err := url.Parse(raw); err == nil {
+		u.Scheme, u.Host = strings.ToLower(u.Scheme), strings.ToLower(u.Host)
+		raw = u.String()
+	}
+	return strings.TrimSuffix(raw, "/")
+}
+
+// ResolveURL finds the bookmark whose link is rawURL, by comparableURL.
 func (p *Provider) ResolveURL(ctx context.Context, rawURL string) (domain.ID, error) {
 	v := url.Values{"search": {rawURL}, "perpage": {strconv.Itoa(maxPerPage)}, "page": {"0"}}
 	var resp struct {
@@ -217,8 +225,9 @@ func (p *Provider) ResolveURL(ctx context.Context, rawURL string) (domain.ID, er
 	if err := p.do(ctx, http.MethodGet, "/raindrops/0", v, nil, &resp); err != nil {
 		return domain.ID{}, err
 	}
+	want := comparableURL(rawURL)
 	for _, it := range resp.Items {
-		if it.Link == rawURL {
+		if comparableURL(it.Link) == want {
 			return rdID(it.ID), nil
 		}
 	}

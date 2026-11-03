@@ -111,6 +111,20 @@ The adapter reads root collections (`GET /collections`) and merges in child coll
 - The bookmark appears in the plan with its real (child) collection, and a root collection with the same name as a taxonomy entry is the one chosen for moves: good.
 - The bookmark is missing, its collection is wrong, or a child collection is mistaken for a taxonomy collection: nested collections are not handled correctly. Keep the library flat until this is fixed.
 
+### [ ] E. PUT with a bad collection id: what status and body come back?
+
+On the throwaway account, with a real bookmark id and a collection id that doesn't exist:
+
+```sh
+curl -si -X PUT -H "Authorization: Bearer $RAINDROP_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"collection":{"$id":999999999}}' https://api.raindrop.io/rest/v1/raindrop/BOOKMARK_ID
+```
+
+Rainwise treats a 2xx with `"result":false` as a failed write, and as not found if `error` or `errorMessage` says "not found". A body with no `result` field counts as success.
+
+- A 4xx, or `"result":false`: fine, the write is reported as failed.
+- A 200 with `"result":true` and the bookmark left alone or sent elsewhere: the write looks successful when it isn't. Keep taxonomy collections from being deleted while Rainwise runs, and report it as a bug to fix in the adapter.
+
 ## Part 3: definition-of-done checks (design section 16)
 
 Run these in order against the throwaway account, with a classifier configured. Start Rainwise with `automation.enabled: false` unless the step says otherwise.
