@@ -336,37 +336,40 @@ func TestRestoreWithoutCollectionSupport(t *testing.T) {
 	}
 }
 
-func TestRestoreKeepsPinsItDidNotUndo(t *testing.T) {
+// A bookmark's pin goes back to what the snapshot recorded, whichever way it has
+// changed since.
+func TestRestoreReturnsPins(t *testing.T) {
 	ctx := context.Background()
 	e := sortedEnv(t)
 	pinnedAt := t0.Add(-time.Hour)
-	if err := e.store.BookmarkStates().PutState(ctx, domain.BookmarkState{ID: bmID(1), KnownCollection: pfake.Inbox, PinSource: domain.PinUser, PinnedAt: &pinnedAt}); err != nil {
-		t.Fatal(err)
+	put := func(n int, known domain.ID, source domain.PinSource, at *time.Time) {
+		t.Helper()
+		if err := e.store.BookmarkStates().PutState(ctx, domain.BookmarkState{ID: bmID(n), KnownCollection: known, PinSource: source, PinnedAt: at}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := e.store.BookmarkStates().PutState(ctx, domain.BookmarkState{ID: bmID(2), KnownCollection: colAlpha, PinSource: domain.PinBaseline, PinnedAt: &pinnedAt}); err != nil {
-		t.Fatal(err)
-	}
+	put(1, pfake.Inbox, domain.PinUser, &pinnedAt)
+	put(2, colAlpha, domain.PinBaseline, &pinnedAt)
 	snap := e.takeSnapshot(domain.Scope{}).SnapshotID
 	e.provider.SetCollection(bmID(1), colBeta)
 	e.provider.SetCollection(bmID(2), colBeta)
 
-	// A move made after the snapshot and then undone by hand is still the user's.
+	// A pin the snapshot didn't have goes, moved or not; one it had comes back.
 	e.tick()
 	movedBack := e.nowFn()
-	if err := e.store.BookmarkStates().PutState(ctx, domain.BookmarkState{ID: bmID(3), KnownCollection: colBeta, PinSource: domain.PinUser, PinnedAt: &movedBack}); err != nil {
-		t.Fatal(err)
-	}
+	put(3, colBeta, domain.PinUser, &movedBack)
+	put(1, colBeta, domain.PinNone, nil)
 
 	e.restore(snap)
 
-	if st := e.state(bmID(1)); st.PinSource != domain.PinUser || !st.PinnedAt.Equal(pinnedAt) {
-		t.Errorf("older user pin: %+v", st)
+	if st := e.state(bmID(1)); st.PinSource != domain.PinUser || st.PinnedAt == nil || !st.PinnedAt.Equal(pinnedAt) {
+		t.Errorf("user pin: %+v", st)
 	}
-	if st := e.state(bmID(2)); st.PinSource != domain.PinBaseline {
+	if st := e.state(bmID(2)); st.PinSource != domain.PinBaseline || st.PinnedAt == nil || !st.PinnedAt.Equal(pinnedAt) {
 		t.Errorf("baseline pin: %+v", st)
 	}
-	if st := e.state(bmID(3)); st.PinSource != domain.PinUser {
-		t.Errorf("newer pin with nothing undone: %+v", st)
+	if st := e.state(bmID(3)); st.PinSource != domain.PinNone || st.PinnedAt != nil {
+		t.Errorf("newer pin: %+v", st)
 	}
 }
 
@@ -423,16 +426,36 @@ func TestRestoreSkipsDeleted(t *testing.T) {
 	t.Run("sent to the trash", func(t *testing.T) {
 		e := sortedEnv(t)
 		snap := e.takeSnapshot(domain.Scope{}).SnapshotID
-		trash := domain.ID{Provider: "fake", Local: "trash"}
-		e.provider.SetCollection(bmID(2), trash)
+		e.provider.SetCollection(bmID(2), colTrash)
 
 		job := e.restore(snap)
 
-		if e.collectionOf(bmID(2)) != trash || job.Progress.Failed != 0 {
+		if e.collectionOf(bmID(2)) != colTrash || job.Progress.Failed != 0 {
 			t.Errorf("in %s, progress %+v", e.collectionOf(bmID(2)), job.Progress)
 		}
 		if rec := e.decision(job.ID, bmID(2)); rec.Result != restoreSkipped {
 			t.Errorf("decision = %+v", rec)
+		}
+	})
+
+	t.Run("sent to the trash, from a place that still exists", func(t *testing.T) {
+		e := sortedEnv(t)
+		gamma := e.addGamma()
+		e.addBookmark(5, gamma)
+		snap := e.takeSnapshot(domain.Scope{}).SnapshotID
+		// The inbox never appears in a listing, and still exists.
+		e.provider.SetCollection(bmID(1), colTrash)
+		e.provider.SetCollection(bmID(5), colTrash)
+
+		job := e.restore(snap)
+
+		for _, n := range []int{1, 5} {
+			if e.collectionOf(bmID(n)) != colTrash {
+				t.Errorf("bookmark %d came out of the trash, to %s", n, e.collectionOf(bmID(n)))
+			}
+			if rec := e.decision(job.ID, bmID(n)); rec.Result != restoreSkipped {
+				t.Errorf("decision = %+v", rec)
+			}
 		}
 	})
 
@@ -450,6 +473,28 @@ func TestRestoreSkipsDeleted(t *testing.T) {
 			t.Errorf("in %s", e.collectionOf(bmID(2)))
 		}
 	})
+}
+
+var colTrash = domain.ID{Provider: "fake", Local: "trash"}
+
+// deleteCollectionToTrash deletes a collection the way some providers do: what's in
+// it goes to their trash, which they don't list.
+func (e *jobEnv) deleteCollectionToTrash(id domain.ID) {
+	e.t.Helper()
+	for token := ""; ; {
+		page, err := e.provider.ListBookmarks(context.Background(), ports.ListQuery{Collection: &id, PageToken: token})
+		if err != nil {
+			e.t.Fatal(err)
+		}
+		for _, b := range page.Items {
+			e.provider.SetCollection(b.ID, colTrash)
+		}
+		if page.NextToken == "" {
+			break
+		}
+		token = page.NextToken
+	}
+	e.deleteCollection(id)
 }
 
 // updateHook runs a function before each write, whose error replaces the write.
@@ -587,6 +632,74 @@ func TestRestoreRecreatesDeletedCollection(t *testing.T) {
 		e.restore(job.SnapshotID)
 		if e.hasCollection("Gamma") || e.collectionOf(bmID(5)) != colBeta {
 			t.Errorf("after undo: %v, bookmark in %s", e.collectionNames(), e.collectionOf(bmID(5)))
+		}
+	})
+
+	t.Run("for bookmarks its deletion sent to the trash", func(t *testing.T) {
+		e := sortedEnv(t)
+		gamma := e.addGamma()
+		e.addBookmark(5, gamma, "g")
+		e.addBookmark(6, gamma)
+		snap := e.takeSnapshot(domain.Scope{}).SnapshotID
+		e.deleteCollectionToTrash(gamma)
+		// Trashed on purpose, from a collection that's still there.
+		e.provider.SetCollection(bmID(2), colTrash)
+
+		dry := e.restore(snap, dryRun)
+		if e.hasCollection("Gamma") || len(e.provider.Writes()) != 0 {
+			t.Errorf("dry run: collections %v, writes %+v", e.collectionNames(), e.provider.Writes())
+		}
+		if rec := e.decision(dry.ID, bmID(5)); rec.Result != "proposed" || rec.TargetCollection == nil || !strings.Contains(rec.Reason, "Gamma") {
+			t.Errorf("dry run decision = %+v", rec)
+		}
+
+		job := e.restore(snap)
+
+		now := e.collectionOf(bmID(5))
+		if !e.hasCollection("Gamma") || now == gamma || now == colTrash {
+			t.Fatalf("collections %v, bookmark in %s", e.collectionNames(), now)
+		}
+		if e.collectionOf(bmID(6)) != now || !slices.Equal(e.tagsOf(bmID(5)), []string{"g"}) {
+			t.Errorf("bookmark 6 in %s, bookmark 5 tags %q", e.collectionOf(bmID(6)), e.tagsOf(bmID(5)))
+		}
+		if e.collectionOf(bmID(2)) != colTrash {
+			t.Errorf("bookmark 2 came out of the trash, to %s", e.collectionOf(bmID(2)))
+		}
+		if job.Progress.Failed != 0 || job.Progress.Changed != 2 {
+			t.Errorf("progress = %+v", job.Progress)
+		}
+		if st := e.state(bmID(5)); st.KnownCollection != now || st.PinSource != domain.PinNone {
+			t.Errorf("state = %+v", st)
+		}
+	})
+
+	t.Run("and a resume finds the one it already made", func(t *testing.T) {
+		e := sortedEnv(t)
+		gamma := e.addGamma()
+		e.addBookmark(5, gamma)
+		e.addBookmark(6, gamma)
+		snap := e.takeSnapshot(domain.Scope{}).SnapshotID
+		e.deleteCollectionToTrash(gamma)
+
+		job := e.restoreJob(snap, func(j *domain.Job) { j.Params.BatchSize = 5 })
+		// Saves in order: own snapshot, start of processing, page 1 (bookmarks 1 to 5).
+		err := Handlers(e.deps)[domain.JobRestore].Run(context.Background(), job, e.stopAfter(job, 3))
+		if !errors.Is(err, ErrInterrupted) {
+			t.Fatalf("err = %v", err)
+		}
+		if e.collectionOf(bmID(6)) != colTrash || !e.hasCollection("Gamma") {
+			t.Fatalf("bookmark 6 in %s, collections %v", e.collectionOf(bmID(6)), e.collectionNames())
+		}
+		e.mustRun(e.reload(job.ID))
+
+		count := 0
+		for _, n := range e.collectionNames() {
+			if n == "Gamma" {
+				count++
+			}
+		}
+		if count != 1 || e.collectionOf(bmID(5)) != e.collectionOf(bmID(6)) {
+			t.Errorf("collections %v, bookmarks in %s and %s", e.collectionNames(), e.collectionOf(bmID(5)), e.collectionOf(bmID(6)))
 		}
 	})
 
@@ -941,45 +1054,113 @@ func TestRestoreTakesOwnSnapshot(t *testing.T) {
 	})
 
 	t.Run("and undoing the restore with it works", func(t *testing.T) {
-		e := sortedEnv(t)
-		pre := e.library(4)
-		backfill := e.backfill(nil)
-		e.tick()
-		// The user adds a manual change on top of what the backfill did.
-		e.provider.SetCollection(bmID(4), colReview)
-		sorted := e.library(4)
-		gamma := e.collectionOf(bmID(1))
-
-		restore := e.restore(backfill.SnapshotID)
-		e.checkLibrary(pre)
-		if e.hasCollection("Gamma") {
-			t.Fatal("restore left Gamma")
-		}
-
-		undo := e.restore(restore.SnapshotID)
-
-		// Everything is back, with Gamma made again under a new ID.
-		remade := e.collectionOf(bmID(1))
-		if remade == gamma || !e.hasCollection("Gamma") {
-			t.Fatalf("bookmark 1 in %s, collections %v", remade, e.collectionNames())
-		}
-		for id, w := range sorted {
-			if w.Collection == gamma {
-				w.Collection = remade
-				sorted[id] = w
+		undoSetup := func(t *testing.T) (e *jobEnv, pre, sorted libraryState, gamma domain.ID, restore *domain.Job, states map[domain.ID]domain.BookmarkState, setting string) {
+			t.Helper()
+			e = sortedEnv(t)
+			pre = e.library(4)
+			backfill := e.backfill(nil)
+			gamma = e.collectionOf(bmID(1))
+			var ok bool
+			if setting, ok = e.setting(firstBackfillKey); !ok {
+				t.Fatal("first backfill not recorded")
 			}
-		}
-		e.checkLibrary(sorted)
-		if e.state(bmID(4)).KnownCollection != colReview {
-			t.Errorf("state = %+v", e.state(bmID(4)))
+			// Manual changes on top of the backfill: one a sync has pinned, and one
+			// nothing has read yet.
+			e.provider.SetCollection(bmID(4), colReview)
+			e.tick()
+			e.syncNow()
+			if st := e.state(bmID(4)); st.PinSource != domain.PinUser {
+				t.Fatalf("not pinned: %+v", st)
+			}
+			e.provider.SetCollection(bmID(3), colReview)
+			sorted = e.library(4)
+			states = map[domain.ID]domain.BookmarkState{}
+			for n := 1; n <= 4; n++ {
+				states[bmID(n)] = e.state(bmID(n))
+			}
+			e.tick()
+
+			restore = e.restore(backfill.SnapshotID)
+			e.checkLibrary(pre)
+			if e.hasCollection("Gamma") {
+				t.Fatal("restore left Gamma")
+			}
+			if st := e.state(bmID(4)); st.PinSource != domain.PinNone {
+				t.Fatalf("restore kept a pin the snapshot didn't have: %+v", st)
+			}
+			if _, ok := e.setting(firstBackfillKey); ok {
+				t.Fatal("restore kept the setting the snapshot didn't have")
+			}
+			return e, pre, sorted, gamma, restore, states, setting
 		}
 
-		// And the undo can itself be undone, leaving no extra Gamma behind.
-		e.restore(undo.SnapshotID)
-		e.checkLibrary(pre)
-		if e.hasCollection("Gamma") {
-			t.Errorf("collections = %v", e.collectionNames())
-		}
+		t.Run("collections, tags, pins, and the setting come back", func(t *testing.T) {
+			e, pre, sorted, gamma, restore, states, setting := undoSetup(t)
+
+			undo := e.restore(restore.SnapshotID)
+
+			// Everything is back, with Gamma made again under a new ID.
+			remade := e.collectionOf(bmID(1))
+			if remade == gamma || !e.hasCollection("Gamma") {
+				t.Fatalf("bookmark 1 in %s, collections %v", remade, e.collectionNames())
+			}
+			for id, w := range sorted {
+				if w.Collection == gamma {
+					w.Collection = remade
+					sorted[id] = w
+				}
+			}
+			e.checkLibrary(sorted)
+			for id, before := range states {
+				st := e.state(id)
+				if st.PinSource != before.PinSource && id != bmID(3) {
+					t.Errorf("%s pin %q, was %q", id, st.PinSource, before.PinSource)
+				}
+				if before.PinnedAt != nil && (st.PinnedAt == nil || !st.PinnedAt.Equal(*before.PinnedAt)) {
+					t.Errorf("%s pinned at %v, was %v", id, st.PinnedAt, before.PinnedAt)
+				}
+				if st.KnownCollection != sorted[id].Collection {
+					t.Errorf("%s known in %s", id, st.KnownCollection)
+				}
+			}
+			// Bookmark 3's move hadn't been read, and would have been pinned next.
+			if st := e.state(bmID(3)); st.PinSource != domain.PinUser {
+				t.Errorf("unread manual move: %+v", st)
+			}
+			if v, ok := e.setting(firstBackfillKey); !ok || v != setting {
+				t.Errorf("setting = %q %v, want %q", v, ok, setting)
+			}
+
+			// And the undo can itself be undone, leaving no extra Gamma behind.
+			e.restore(undo.SnapshotID)
+			e.checkLibrary(pre)
+			if e.hasCollection("Gamma") {
+				t.Errorf("collections = %v", e.collectionNames())
+			}
+			if _, ok := e.setting(firstBackfillKey); ok {
+				t.Error("undoing the undo kept the setting")
+			}
+			if st := e.state(bmID(4)); st.PinSource != domain.PinNone {
+				t.Errorf("undoing the undo kept the pin: %+v", st)
+			}
+		})
+
+		t.Run("a later backfill respects the user's pins", func(t *testing.T) {
+			e, _, _, _, restore, _, _ := undoSetup(t)
+			e.restore(restore.SnapshotID)
+			e.tick()
+
+			e.backfill(nil)
+
+			for _, n := range []int{3, 4} {
+				if got := e.collectionOf(bmID(n)); got != colReview {
+					t.Errorf("bookmark %d moved to %s", n, got)
+				}
+				if st := e.state(bmID(n)); st.PinSource != domain.PinUser {
+					t.Errorf("bookmark %d: %+v", n, st)
+				}
+			}
+		})
 	})
 }
 
@@ -1221,16 +1402,47 @@ func TestRestoreResetsFirstBackfill(t *testing.T) {
 		}
 	})
 
-	t.Run("undoing with its own snapshot leaves it cleared", func(t *testing.T) {
+	t.Run("undoing with its own snapshot puts it back", func(t *testing.T) {
 		e := sortedEnv(t)
 		pre := e.takeSnapshot(domain.Scope{}).SnapshotID
 		e.tick()
-		e.putSetting(firstBackfillKey, e.nowFn().Format(time.RFC3339Nano))
+		done := e.nowFn().Format(time.RFC3339Nano)
+		e.putSetting(firstBackfillKey, done)
 		e.tick()
 		restore := e.restore(pre)
+		if _, ok := e.setting(firstBackfillKey); ok {
+			t.Fatal("not cleared")
+		}
+		e.restore(restore.SnapshotID)
+		if v, ok := e.setting(firstBackfillKey); !ok || v != done {
+			t.Errorf("setting = %q %v", v, ok)
+		}
+	})
+
+	t.Run("a scoped restore leaves it, whenever the snapshot was taken", func(t *testing.T) {
+		e := sortedEnv(t)
+		snap := e.takeSnapshot(domain.Scope{Collections: []string{"Beta"}}).SnapshotID
+		e.provider.SetCollection(bmID(3), colReview)
+		e.tick()
+		done := e.nowFn().Format(time.RFC3339Nano)
+		e.putSetting(firstBackfillKey, done)
+		e.tick()
+
+		restore := e.restore(snap)
+		if e.collectionOf(bmID(3)) != colBeta {
+			t.Fatalf("in %s", e.collectionOf(bmID(3)))
+		}
+		if v, ok := e.setting(firstBackfillKey); !ok || v != done {
+			t.Errorf("setting = %q %v", v, ok)
+		}
+
+		// Nor does a scoped one set what the snapshot didn't record.
+		if err := e.store.BookmarkStates().DeleteSetting(context.Background(), firstBackfillKey); err != nil {
+			t.Fatal(err)
+		}
 		e.restore(restore.SnapshotID)
 		if _, ok := e.setting(firstBackfillKey); ok {
-			t.Error("setting came back")
+			t.Error("scoped restore set it")
 		}
 	})
 
@@ -1243,21 +1455,6 @@ func TestRestoreResetsFirstBackfill(t *testing.T) {
 		}
 	})
 
-	t.Run("an unreadable time fails rather than guessing", func(t *testing.T) {
-		e := sortedEnv(t)
-		snap := e.takeSnapshot(domain.Scope{}).SnapshotID
-		e.putSetting(firstBackfillKey, "not a time")
-		job := e.restoreJob(snap)
-		if err := e.runJob(job); err == nil {
-			t.Error("no error")
-		}
-		if _, ok := e.setting(firstBackfillKey); !ok {
-			t.Error("cleared it")
-		}
-		if len(e.provider.Writes()) != 0 {
-			t.Errorf("writes = %+v", e.provider.Writes())
-		}
-	})
 }
 
 func TestRestoreResume(t *testing.T) {

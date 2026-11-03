@@ -106,6 +106,78 @@ func TestSnapshotRecordsAll(t *testing.T) {
 		}
 	})
 
+	t.Run("each bookmark's pin", func(t *testing.T) {
+		e := newJobEnv(t)
+		useRealSnapshots(e, 10)
+		ctx := context.Background()
+		e.addBookmark(1, colAlpha)
+		e.addBookmark(2, colBeta)
+		e.addBookmark(3, colAlpha)
+		e.addBookmark(4, colBeta)
+		e.addBookmark(5, colBeta)
+		earlier := t0.Add(-time.Hour)
+		for _, st := range []domain.BookmarkState{
+			{ID: bmID(1), KnownCollection: colAlpha, PinSource: domain.PinUser, PinnedAt: &earlier},
+			{ID: bmID(2), KnownCollection: colBeta, PinSource: domain.PinBaseline, PinnedAt: &earlier},
+			{ID: bmID(3), KnownCollection: colAlpha},
+			{ID: bmID(4), KnownCollection: colAlpha},                              // Moved by hand, unread.
+			{ID: bmID(5), KnownCollection: colAlpha, PendingCollection: &colBeta}, // Our own landed write.
+		} {
+			if err := e.store.BookmarkStates().PutState(ctx, st); err != nil {
+				t.Fatal(err)
+			}
+		}
+		e.addBookmark(6, colAlpha) // No state at all.
+
+		items := e.snapshotItems(e.takeSnapshot(domain.Scope{}).SnapshotID)
+
+		for n, want := range map[int]struct {
+			source domain.PinSource
+			at     *time.Time
+		}{
+			1: {domain.PinUser, &earlier},
+			2: {domain.PinBaseline, &earlier},
+			3: {domain.PinNone, nil},
+			4: {domain.PinUser, &t0},
+			5: {domain.PinNone, nil},
+			6: {domain.PinNone, nil},
+		} {
+			got := items[bmID(n)]
+			if got.PinSource != want.source || (got.PinnedAt == nil) != (want.at == nil) || (want.at != nil && !got.PinnedAt.Equal(*want.at)) {
+				t.Errorf("bookmark %d: %+v, want %+v", n, got, want)
+			}
+		}
+		// Reading isn't noticing: the next job still does that.
+		if st := e.state(bmID(4)); st.PinSource != domain.PinNone || st.KnownCollection != colAlpha {
+			t.Errorf("state changed: %+v", st)
+		}
+	})
+
+	t.Run("the first-backfill setting, for the whole library only", func(t *testing.T) {
+		e := newJobEnv(t)
+		useRealSnapshots(e, 10)
+		e.addBookmark(1, colBeta)
+		get := func(id string) domain.Snapshot {
+			t.Helper()
+			snap, err := e.store.Snapshots().GetSnapshot(context.Background(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return snap
+		}
+		if v := get(e.takeSnapshot(domain.Scope{}).SnapshotID).FirstBackfillDone; v != "" {
+			t.Errorf("unset: %q", v)
+		}
+		const done = "2026-01-02T03:04:05Z"
+		e.putSetting(firstBackfillKey, done)
+		if v := get(e.takeSnapshot(domain.Scope{}).SnapshotID).FirstBackfillDone; v != done {
+			t.Errorf("set: %q", v)
+		}
+		if v := get(e.takeSnapshot(domain.Scope{Collections: []string{"Beta"}}).SnapshotID).FirstBackfillDone; v != "" {
+			t.Errorf("scoped: %q", v)
+		}
+	})
+
 	t.Run("more bookmarks than one page", func(t *testing.T) {
 		e := newJobEnv(t)
 		useRealSnapshots(e, 10)

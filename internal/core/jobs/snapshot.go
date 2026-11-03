@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/wikiabhi/rainwise/internal/core/pipeline"
 	"github.com/wikiabhi/rainwise/internal/domain"
 	"github.com/wikiabhi/rainwise/internal/ports"
 )
@@ -35,8 +36,9 @@ func NewSnapshotService(d SnapshotDeps) *SnapshotService {
 	return &SnapshotService{d: d}
 }
 
-// Take records every bookmark in scope and the collection list, then prunes to
-// retention. It takes no taxonomy, so scope must not name collections by taxonomy
+// Take records every bookmark in scope and the collection list, along with what
+// protects them from later jobs: each one's pin and, for the whole library, the
+// first-backfill setting. Then it prunes to retention. It takes no taxonomy, so scope must not name collections by taxonomy
 // key; see scopeMatcher.resolvedScope.
 //
 // The items are gathered first and stored in one call, so a failed listing leaves
@@ -54,23 +56,30 @@ func (s *SnapshotService) Take(ctx context.Context, provider string, scope domai
 	if err != nil {
 		return "", err
 	}
-	items, err := s.scopeItems(ctx, match)
+	now := s.d.Now().UTC()
+	var firstBackfill string
+	if scope.IsEmpty() {
+		if firstBackfill, _, err = s.d.Store.BookmarkStates().GetSetting(ctx, firstBackfillPrefix+provider); err != nil {
+			return "", err
+		}
+	}
+	items, err := s.scopeItems(ctx, match, now)
 	if err != nil {
 		return "", err
 	}
-	now := s.d.Now().UTC()
 	id, err := newSnapshotID(now)
 	if err != nil {
 		return "", err
 	}
 	snaps := s.d.Store.Snapshots()
 	if err := snaps.CreateSnapshot(ctx, domain.Snapshot{
-		ID:          id,
-		Provider:    provider,
-		JobID:       jobID,
-		CreatedAt:   now,
-		Collections: collections,
-		ScopeAll:    scope.IsEmpty(),
+		ID:                id,
+		Provider:          provider,
+		JobID:             jobID,
+		CreatedAt:         now,
+		Collections:       collections,
+		ScopeAll:          scope.IsEmpty(),
+		FirstBackfillDone: firstBackfill,
 	}); err != nil {
 		return "", fmt.Errorf("store snapshot: %w", err)
 	}
@@ -84,7 +93,7 @@ func (s *SnapshotService) Take(ctx context.Context, provider string, scope domai
 	return id, nil
 }
 
-func (s *SnapshotService) scopeItems(ctx context.Context, match scopeMatcher) ([]domain.SnapshotItem, error) {
+func (s *SnapshotService) scopeItems(ctx context.Context, match scopeMatcher, now time.Time) ([]domain.SnapshotItem, error) {
 	var items []domain.SnapshotItem
 	seen := map[domain.ID]bool{} // A library changing underneath page numbers can repeat one.
 	for token := ""; ; {
@@ -95,7 +104,11 @@ func (s *SnapshotService) scopeItems(ctx context.Context, match scopeMatcher) ([
 		for _, b := range page.Items {
 			if match.matches(b) && !seen[b.ID] {
 				seen[b.ID] = true
-				items = append(items, domain.SnapshotItem{Bookmark: b.ID, Collection: b.Collection, Tags: b.Tags})
+				pin, pinnedAt, err := s.pinOf(ctx, b, now)
+				if err != nil {
+					return nil, err
+				}
+				items = append(items, domain.SnapshotItem{Bookmark: b.ID, Collection: b.Collection, Tags: b.Tags, PinSource: pin, PinnedAt: pinnedAt})
 			}
 		}
 		if page.NextToken == "" {
@@ -103,6 +116,21 @@ func (s *SnapshotService) scopeItems(ctx context.Context, match scopeMatcher) ([
 		}
 		token = page.NextToken
 	}
+}
+
+// pinOf is the bookmark's pin as of now. A manual move no job has read yet would be
+// pinned by the next one, so it counts: without that, restoring this snapshot would
+// put the bookmark back with nothing protecting it. The stored state isn't changed.
+func (s *SnapshotService) pinOf(ctx context.Context, b domain.Bookmark, now time.Time) (domain.PinSource, *time.Time, error) {
+	st, known, err := s.d.Store.BookmarkStates().GetState(ctx, b.ID)
+	if err != nil {
+		return "", nil, fmt.Errorf("load state of %s: %w", b.ID, err)
+	}
+	if !known {
+		return domain.PinNone, nil, nil
+	}
+	pipeline.DetectManualMove(&st, b, now)
+	return st.PinSource, st.PinnedAt, nil
 }
 
 // prune keeps the newest snapshots, the one just taken, and any a job not yet

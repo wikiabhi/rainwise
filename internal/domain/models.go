@@ -91,10 +91,15 @@ type Snapshot struct {
 	Collections        []Collection `json:"collections"`
 	CreatedCollections []ID         `json:"created_collections"`
 	ScopeAll           bool         `json:"scope_all"`
+	// FirstBackfillDone is the first_backfill_done setting when the snapshot was
+	// taken, "" if unset. Only a whole-library snapshot records it.
+	FirstBackfillDone string `json:"first_backfill_done,omitempty"`
 }
 
 type SnapshotItem struct {
-	Bookmark   ID       `json:"bookmark"`
-	Collection ID       `json:"collection"`
-	Tags       []string `json:"tags"`
+	Bookmark   ID         `json:"bookmark"`
+	Collection ID         `json:"collection"`
+	Tags       []string   `json:"tags"`
+	PinSource  PinSource  `json:"pin_source,omitempty"`
+	PinnedAt   *time.Time `json:"pinned_at,omitempty"`
 }

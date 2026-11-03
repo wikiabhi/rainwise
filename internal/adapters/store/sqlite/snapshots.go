@@ -11,9 +11,9 @@ import (
 type snapStore struct{ db *sql.DB }
 
 func (s snapStore) CreateSnapshot(ctx context.Context, sn domain.Snapshot) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO snapshots (id, provider, job_id, created_at, collections, created_collections, scope_all)
-		VALUES (?,?,?,?,?,?,?)`, sn.ID, sn.Provider, sn.JobID, fmtTime(sn.CreatedAt), toJSON(sn.Collections),
-		toJSON(sn.CreatedCollections), boolInt(sn.ScopeAll))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO snapshots (id, provider, job_id, created_at, collections, created_collections, scope_all, first_backfill_done)
+		VALUES (?,?,?,?,?,?,?,?)`, sn.ID, sn.Provider, sn.JobID, fmtTime(sn.CreatedAt), toJSON(sn.Collections),
+		toJSON(sn.CreatedCollections), boolInt(sn.ScopeAll), sn.FirstBackfillDone)
 	if isUnique(err) {
 		return fmt.Errorf("snapshot %q exists: %w", sn.ID, domain.ErrConflict)
 	}
@@ -41,8 +41,8 @@ func (s snapStore) AddSnapshotItems(ctx context.Context, id string, items []doma
 	}
 	defer tx.Rollback()
 	for _, it := range items {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO snapshot_items (snapshot_id, bookmark, collection, tags) VALUES (?,?,?,?)`,
-			id, it.Bookmark.String(), idString(it.Collection), toJSON(it.Tags)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO snapshot_items (snapshot_id, bookmark, collection, tags, pin_source, pinned_at) VALUES (?,?,?,?,?,?)`,
+			id, it.Bookmark.String(), idString(it.Collection), toJSON(it.Tags), string(it.PinSource), fmtTimePtr(it.PinnedAt)); err != nil {
 			return err
 		}
 	}
@@ -70,7 +70,7 @@ func (s snapStore) AddCreatedCollection(ctx context.Context, id string, c domain
 	return tx.Commit()
 }
 
-const snapCols = `id, provider, job_id, created_at, collections, created_collections, scope_all`
+const snapCols = `id, provider, job_id, created_at, collections, created_collections, scope_all, first_backfill_done`
 
 func scanSnapshot(r scanner) (domain.Snapshot, error) {
 	var (
@@ -78,7 +78,7 @@ func scanSnapshot(r scanner) (domain.Snapshot, error) {
 		created, cols, made string
 		all                 int
 	)
-	if err := r.Scan(&sn.ID, &sn.Provider, &sn.JobID, &created, &cols, &made, &all); err != nil {
+	if err := r.Scan(&sn.ID, &sn.Provider, &sn.JobID, &created, &cols, &made, &all, &sn.FirstBackfillDone); err != nil {
 		return domain.Snapshot{}, err
 	}
 	var err error
@@ -135,7 +135,7 @@ func (s snapStore) ListSnapshotItems(ctx context.Context, id, cursor string, lim
 	if err := s.exists(ctx, id); err != nil {
 		return domain.Page[domain.SnapshotItem]{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT bookmark, collection, tags FROM snapshot_items WHERE snapshot_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
+	rows, err := s.db.QueryContext(ctx, `SELECT bookmark, collection, tags, pin_source, pinned_at FROM snapshot_items WHERE snapshot_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
 		id, lim+1, off)
 	if err != nil {
 		return domain.Page[domain.SnapshotItem]{}, err
@@ -143,11 +143,15 @@ func (s snapStore) ListSnapshotItems(ctx context.Context, id, cursor string, lim
 	defer rows.Close()
 	var out []domain.SnapshotItem
 	for rows.Next() {
-		var b, c, tags string
-		if err := rows.Scan(&b, &c, &tags); err != nil {
+		var b, c, tags, pin string
+		var pinned sql.NullString
+		if err := rows.Scan(&b, &c, &tags, &pin, &pinned); err != nil {
 			return domain.Page[domain.SnapshotItem]{}, err
 		}
-		var it domain.SnapshotItem
+		it := domain.SnapshotItem{PinSource: domain.PinSource(pin)}
+		if it.PinnedAt, err = parseTimePtr(pinned); err != nil {
+			return domain.Page[domain.SnapshotItem]{}, err
+		}
 		if it.Bookmark, err = parseID(b); err != nil {
 			return domain.Page[domain.SnapshotItem]{}, err
 		}

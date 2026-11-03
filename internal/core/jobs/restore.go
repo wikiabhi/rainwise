@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/wikiabhi/rainwise/internal/core/pipeline"
 	"github.com/wikiabhi/rainwise/internal/domain"
@@ -133,7 +132,7 @@ func (h restoreJob) Run(ctx context.Context, job *domain.Job, rc RunContext) err
 	if err := run.removeCreatedCollections(ctx); err != nil {
 		return err
 	}
-	if err := d.clearFirstBackfill(ctx, snap); err != nil {
+	if err := d.restoreFirstBackfill(ctx, snap); err != nil {
 		return err
 	}
 	job.Checkpoint.Phase = phaseDone
@@ -143,13 +142,10 @@ func (h restoreJob) Run(ctx context.Context, job *domain.Job, rc RunContext) err
 	return nil
 }
 
-// prepareRestore refuses what can't work, counts the work, and for a real restore
+// prepareRestore counts the work, and for a real restore
 // takes the snapshot that undoes it, before anything changes. That snapshot covers
 // what this restore can touch: the bookmarks of the one it goes back to.
 func (d Deps) prepareRestore(ctx context.Context, job *domain.Job, rc RunContext, snap domain.Snapshot) error {
-	if _, err := d.firstBackfillAfter(ctx, snap); err != nil {
-		return err
-	}
 	ids, err := d.snapshotBookmarks(ctx, snap.ID)
 	if err != nil {
 		return err
@@ -190,28 +186,22 @@ func (d Deps) snapshotBookmarks(ctx context.Context, id string) ([]string, error
 	}
 }
 
-// firstBackfillAfter reports whether a first backfill finished after this snapshot
-// was taken, in which case restoring it makes the next backfill a first one again
-// (§9.1a). A time that can't be read is an error, not a guess in either direction.
-func (d Deps) firstBackfillAfter(ctx context.Context, snap domain.Snapshot) (bool, error) {
-	raw, ok, err := d.Store.BookmarkStates().GetSetting(ctx, firstBackfillPrefix+snap.Provider)
-	if err != nil || !ok {
-		return false, err
+// restoreFirstBackfill puts the first-backfill setting back as a whole-library
+// snapshot found it (§9.1a). A scoped restore leaves it: part of the library going
+// back doesn't change a rule for all of it.
+func (d Deps) restoreFirstBackfill(ctx context.Context, snap domain.Snapshot) error {
+	if !snap.ScopeAll {
+		return nil
 	}
-	at, err := time.Parse(time.RFC3339, raw)
+	states, key := d.Store.BookmarkStates(), firstBackfillPrefix+snap.Provider
+	var err error
+	if snap.FirstBackfillDone == "" {
+		err = states.DeleteSetting(ctx, key)
+	} else {
+		err = states.PutSetting(ctx, key, snap.FirstBackfillDone)
+	}
 	if err != nil {
-		return false, fmt.Errorf("parse first backfill time %q: %w", raw, err)
-	}
-	return at.After(snap.CreatedAt), nil
-}
-
-func (d Deps) clearFirstBackfill(ctx context.Context, snap domain.Snapshot) error {
-	after, err := d.firstBackfillAfter(ctx, snap)
-	if err != nil || !after {
-		return err
-	}
-	if err := d.Store.BookmarkStates().DeleteSetting(ctx, firstBackfillPrefix+snap.Provider); err != nil {
-		return fmt.Errorf("clear first backfill: %w", err)
+		return fmt.Errorf("restore first backfill: %w", err)
 	}
 	return nil
 }
@@ -262,7 +252,7 @@ func (r *restoreRun) restoreItem(ctx context.Context, item domain.SnapshotItem) 
 	if err != nil {
 		return pipeline.Outcome{}, fmt.Errorf("read bookmark %s: %w", item.Bookmark, err)
 	}
-	trashed, err := r.cols.isUnlisted(ctx, b.Collection)
+	trashed, err := r.cols.isTrashed(ctx, b.Collection, item.Collection)
 	if err != nil {
 		return pipeline.Outcome{}, err
 	}
@@ -281,7 +271,7 @@ func (r *restoreRun) restoreItem(ctx context.Context, item domain.SnapshotItem) 
 	tags := append([]string{}, item.Tags...)
 	moved := target != b.Collection
 	if !moved && sameTags(b.Tags, tags) {
-		return r.alreadyMatches(ctx, b, target)
+		return r.alreadyMatches(ctx, b, item)
 	}
 	rec := RestoreDiff{Bookmark: b.ID, FromCollection: b.Collection, ToCollection: target, FromTags: b.Tags, ToTags: tags}.record(r.job.ID, note)
 	if r.job.DryRun {
@@ -291,13 +281,13 @@ func (r *restoreRun) restoreItem(ctx context.Context, item domain.SnapshotItem) 
 		}
 		return pipeline.Outcome{Status: pipeline.Changed, Record: rec}, nil
 	}
-	return r.write(ctx, b, target, tags, moved, rec)
+	return r.write(ctx, b, item, target, tags, moved, rec)
 }
 
 // write sets one bookmark, recording the move first as the pipeline does: if this
 // process dies with the write landed, whoever reads the bookmark next can tell our
 // move from the user's and sets no pin.
-func (r *restoreRun) write(ctx context.Context, b domain.Bookmark, target domain.ID, tags []string, moved bool, rec domain.DecisionRecord) (pipeline.Outcome, error) {
+func (r *restoreRun) write(ctx context.Context, b domain.Bookmark, item domain.SnapshotItem, target domain.ID, tags []string, moved bool, rec domain.DecisionRecord) (pipeline.Outcome, error) {
 	states := r.Store.BookmarkStates()
 	patch := ports.BookmarkPatch{SetTags: tags}
 	if moved {
@@ -327,7 +317,7 @@ func (r *restoreRun) write(ctx context.Context, b domain.Bookmark, target domain
 	if err != nil {
 		return pipeline.Outcome{}, fmt.Errorf("write bookmark %s: %w", b.ID, err)
 	}
-	if err := r.settle(ctx, updated, moved); err != nil {
+	if err := r.settle(ctx, updated, item); err != nil {
 		return pipeline.Outcome{}, err
 	}
 	return r.applied(ctx, rec)
@@ -362,7 +352,7 @@ func (r *restoreRun) writeNotFound(ctx context.Context, b domain.Bookmark, rec d
 
 // alreadyMatches handles a bookmark that needs no write. It may be one this job
 // wrote before being interrupted, which still counts as this job's change.
-func (r *restoreRun) alreadyMatches(ctx context.Context, b domain.Bookmark, target domain.ID) (pipeline.Outcome, error) {
+func (r *restoreRun) alreadyMatches(ctx context.Context, b domain.Bookmark, item domain.SnapshotItem) (pipeline.Outcome, error) {
 	if r.job.DryRun {
 		return pipeline.Outcome{Status: pipeline.Unchanged}, nil
 	}
@@ -371,7 +361,7 @@ func (r *restoreRun) alreadyMatches(ctx context.Context, b domain.Bookmark, targ
 		return pipeline.Outcome{}, fmt.Errorf("load decision: %w", err)
 	}
 	ours = ours && (rec.Result == restorePending || rec.Result == restoreApplied)
-	if err := r.settle(ctx, b, ours && rec.ObservedCollection != target); err != nil {
+	if err := r.settle(ctx, b, item); err != nil {
 		return pipeline.Outcome{}, err
 	}
 	if !ours {
@@ -393,10 +383,9 @@ func (r *restoreRun) applied(ctx context.Context, rec domain.DecisionRecord) (pi
 }
 
 // settle records a restored bookmark as it now is, so nothing reads it as a manual
-// move, and so sync leaves it alone until a backfill or reclassify (§11). A user
-// pin newer than the snapshot marks a manual change, so if the restore has just
-// moved the bookmark back, the pin no longer says anything true and it goes.
-func (r *restoreRun) settle(ctx context.Context, b domain.Bookmark, movedBack bool) error {
+// move, and so sync leaves it alone until a backfill or reclassify (§11). Its pin
+// goes back to what the snapshot recorded, which is what makes a restore undoable.
+func (r *restoreRun) settle(ctx context.Context, b domain.Bookmark, item domain.SnapshotItem) error {
 	st, err := r.loadState(ctx, b.ID)
 	if err != nil {
 		return err
@@ -406,9 +395,7 @@ func (r *restoreRun) settle(ctx context.Context, b domain.Bookmark, movedBack bo
 	st.PendingCollection, st.PendingTags = nil, nil
 	st.Status = statusRestored
 	st.ProcessedAt, st.RestoredAt = &now, &now
-	if movedBack && st.PinSource == domain.PinUser && st.PinnedAt != nil && st.PinnedAt.After(r.snap.CreatedAt) {
-		st.PinSource, st.PinnedAt = domain.PinNone, nil
-	}
+	st.PinSource, st.PinnedAt = item.PinSource, item.PinnedAt
 	if err := r.Store.BookmarkStates().PutState(ctx, st); err != nil {
 		return fmt.Errorf("save state of %s: %w", b.ID, err)
 	}
@@ -630,12 +617,17 @@ func (c *restoreCollections) isInbox(id domain.ID) bool {
 	return c.inbox != nil && *c.inbox == id
 }
 
-// isUnlisted reports a bookmark sitting in a collection the provider doesn't list.
-// That isn't where a user files things: an inbox is declared and everything else
-// is listed, unless it's newer than the listing, so that's checked first. It's
-// where a provider's trash keeps a deleted bookmark readable, and "deleted" is what
-// §11 skips.
-func (c *restoreCollections) isUnlisted(ctx context.Context, id domain.ID) (bool, error) {
+// isTrashed reports a bookmark the user deleted, sitting in a collection the
+// provider doesn't list. That isn't where a user files things: an inbox is declared
+// and everything else is listed, unless it's newer than the listing, so that's
+// checked first. It's where a provider's trash keeps a deleted bookmark readable,
+// and "deleted" is what §11 skips.
+//
+// Deleting a collection can send its bookmarks to the same place. So a bookmark
+// whose snapshot collection is gone too counts as caught up in that, and goes back
+// to the collection, which is recreated. The ID is what decides: one recreated
+// earlier in this job, or a run before it, has a new one.
+func (c *restoreCollections) isTrashed(ctx context.Context, id, snapshotCollection domain.ID) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	known := func() bool {
@@ -648,7 +640,12 @@ func (c *restoreCollections) isUnlisted(ctx context.Context, id domain.ID) (bool
 	if err := c.refreshLocked(ctx); err != nil {
 		return false, err
 	}
-	return !known(), nil
+	if known() {
+		return false, nil
+	}
+	_, listed := c.listed[snapshotCollection]
+	_, recreatable := c.snap[snapshotCollection]
+	return listed || !recreatable || c.isInbox(snapshotCollection), nil
 }
 
 // target gives the collection a snapshot's bookmark goes back to. One that neither

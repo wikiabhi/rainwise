@@ -404,7 +404,7 @@ func Run(t *testing.T, newStore func(t *testing.T) ports.Store) {
 	t.Run("SnapshotItemsPaging", func(t *testing.T) {
 		ss := newStore(t).Snapshots()
 		snap := domain.Snapshot{
-			ID: "s1", Provider: "p", JobID: "j1", CreatedAt: t0, ScopeAll: true,
+			ID: "s1", Provider: "p", JobID: "j1", CreatedAt: t0, ScopeAll: true, FirstBackfillDone: "2026-01-02T03:04:05Z",
 			Collections:        []domain.Collection{{ID: bid(10), Name: "C", Parent: &domain.ID{Provider: "p", Local: "9"}}},
 			CreatedCollections: []domain.ID{},
 		}
@@ -418,6 +418,9 @@ func Run(t *testing.T, newStore func(t *testing.T) ports.Store) {
 		for i := 0; i < 25; i++ {
 			items = append(items, domain.SnapshotItem{Bookmark: bid(i), Collection: bid(10), Tags: []string{"t"}})
 		}
+		pinnedAt := t0.Add(time.Hour)
+		items[3].PinSource, items[3].PinnedAt = domain.PinUser, &pinnedAt
+		items[4].PinSource, items[4].PinnedAt = domain.PinBaseline, &pinnedAt
 		must(t, ss.AddSnapshotItems(ctx, "s1", items[:10]))
 		must(t, ss.AddSnapshotItems(ctx, "s1", items[10:]))
 		var all []domain.SnapshotItem

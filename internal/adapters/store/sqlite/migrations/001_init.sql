@@ -69,7 +69,8 @@ CREATE TABLE snapshots (
     created_at          TEXT NOT NULL,
     collections         TEXT NOT NULL,
     created_collections TEXT NOT NULL,
-    scope_all           INTEGER NOT NULL
+    scope_all           INTEGER NOT NULL,
+    first_backfill_done TEXT NOT NULL
 );
 
 CREATE TABLE snapshot_items (
@@ -77,7 +78,9 @@ CREATE TABLE snapshot_items (
     snapshot_id TEXT NOT NULL REFERENCES snapshots (id) ON DELETE CASCADE,
     bookmark    TEXT NOT NULL,
     collection  TEXT NOT NULL,
-    tags        TEXT NOT NULL
+    tags        TEXT NOT NULL,
+    pin_source  TEXT NOT NULL,
+    pinned_at   TEXT
 );
 CREATE INDEX snapshot_items_snap ON snapshot_items (snapshot_id, seq);
 
