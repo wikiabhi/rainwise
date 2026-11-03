@@ -1,0 +1,4 @@
+.superpowers/
+/bin/
+*.db
+*.db-*
