@@ -82,10 +82,13 @@ type WorkerDeps struct {
 	TaxonomyID   string
 	TagVocabSize int
 	OnMoveRetag  bool
-	Now          func() time.Time
-	Sleep        func(context.Context, time.Duration) error
-	PollEvery    time.Duration
-	Log          *slog.Logger
+	// AutomationOff stops events being processed (§9.0), including any left pending
+	// from when it was on. They wait for it to come back. Held events still age out.
+	AutomationOff bool
+	Now           func() time.Time
+	Sleep         func(context.Context, time.Duration) error
+	PollEvery     time.Duration
+	Log           *slog.Logger
 }
 
 // Worker drains the event inbox (§9.2 step 3).
@@ -158,6 +161,9 @@ func (w *Worker) tick(ctx context.Context) (int, error) {
 		if n > 0 {
 			w.d.Log.Info("dropped stale held events", "count", n)
 		}
+	}
+	if w.d.AutomationOff {
+		return 0, nil
 	}
 	evs, err := es.ClaimEvents(ctx, now, claimBatch)
 	if err != nil {

@@ -49,6 +49,9 @@ type Deps struct {
 	DurableWait  time.Duration
 	Sleep        func(context.Context, time.Duration) error
 	Snapshots    SnapshotTaker
+	// AutomationOff refuses real syncs that were queued or running from before it
+	// was turned off (§9.0). Service.Create refuses new ones.
+	AutomationOff bool
 }
 
 // Handlers returns the handler for each job type.

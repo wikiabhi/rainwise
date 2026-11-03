@@ -196,3 +196,32 @@ func TestValidateDynamic(t *testing.T) {
 		t.Fatalf("err = %v, want two-reviews", err)
 	}
 }
+
+func TestProviderFlags(t *testing.T) {
+	cfg, err := load(t, baseYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := cfg.Providers["raindrop"]; p.IncrementalSince || p.TagListing {
+		t.Fatalf("flags should default to false: %+v", p)
+	}
+	y := strings.Replace(baseYAML, "{type: raindrop,", "{type: raindrop, incremental_since: true, tag_listing: true,", 1)
+	if cfg, err = load(t, y); err != nil {
+		t.Fatal(err)
+	}
+	if p := cfg.Providers["raindrop"]; !p.IncrementalSince || !p.TagListing {
+		t.Fatalf("flags not read: %+v", p)
+	}
+}
+
+// YAML 1.1 reads a bare off as a boolean; here the setting must stay the word.
+func TestContentFetchOffIsAString(t *testing.T) {
+	y := strings.Replace(baseYAML, "taxonomy: default}", "taxonomy: default, content_fetch: off}", 1)
+	cfg, err := load(t, y)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Processing.ContentFetch != "off" {
+		t.Fatalf("content_fetch = %q", cfg.Processing.ContentFetch)
+	}
+}

@@ -60,6 +60,10 @@ type ProviderConfig struct {
 	Token             Secret `yaml:"token"`
 	WebhookSecret     Secret `yaml:"webhook_secret"`
 	RequestsPerMinute int    `yaml:"requests_per_minute"`
+	// IncrementalSince and TagListing declare provider features the live checks
+	// must confirm before they're turned on, so both default to false.
+	IncrementalSince bool `yaml:"incremental_since"`
+	TagListing       bool `yaml:"tag_listing"`
 }
 
 type ClassifierConfig struct {

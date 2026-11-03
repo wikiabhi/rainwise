@@ -725,3 +725,13 @@ func TestRunsPersistTagVocabulary(t *testing.T) {
 		}
 	})
 }
+
+// Service.Create turns away a real sync while automation is off, but one queued or
+// running from before it was turned off gets here (§9.0).
+func TestRealSyncRefusedWithAutomationOff(t *testing.T) {
+	h := syncJob{Deps{AutomationOff: true}}
+	job := &domain.Job{ID: "j", Type: domain.JobSync, Provider: "fake"}
+	if err := h.Run(context.Background(), job, RunContext{}); !errors.Is(err, domain.ErrAutomationDisabled) {
+		t.Fatalf("err = %v", err)
+	}
+}

@@ -22,6 +22,9 @@ type syncJob struct{ Deps }
 
 func (h syncJob) Run(ctx context.Context, job *domain.Job, rc RunContext) error {
 	d := h.Deps
+	if d.AutomationOff && !job.DryRun {
+		return fmt.Errorf("real sync: %w", domain.ErrAutomationDisabled)
+	}
 	start := d.startTime(job)
 	key := watermarkPrefix + d.Provider.Name()
 	watermark, hasWatermark, err := d.loadWatermark(ctx, key)

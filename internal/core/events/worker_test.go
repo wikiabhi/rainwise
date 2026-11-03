@@ -227,6 +227,39 @@ func TestHeldDropped(t *testing.T) {
 	}
 }
 
+// Events left pending from when automation was on must not write once it's off
+// (§9.0), but held events still age out.
+func TestAutomationOffProcessesNothing(t *testing.T) {
+	e := newEnv(t)
+	e.provider.Add(inbox())
+	ev := e.event(domain.EventBookmarkCreated, ref("1"))
+	e.ingest(ev)
+	if err := e.ingestor(false).Ingest(context.Background(), []domain.Event{e.event(domain.EventBookmarkCreated, ref("1"))}); err != nil {
+		t.Fatal(err)
+	}
+	e.now = e.now.Add(8 * 24 * time.Hour)
+
+	w := e.worker(e.provider, false)
+	w.d.AutomationOff = true
+	if n := e.tick(w); n != 0 {
+		t.Fatalf("claimed %d events", n)
+	}
+	if n := len(e.provider.Writes()); n != 0 {
+		t.Fatalf("%d provider writes", n)
+	}
+	if n := e.cls.Calls(); n != 0 {
+		t.Fatalf("%d classifier calls", n)
+	}
+	if n, _ := e.store.Events().DropHeldBefore(context.Background(), e.now.Add(time.Hour)); n != 0 {
+		t.Errorf("%d held events survived past 7 days", n)
+	}
+	// Still there, for when automation comes back.
+	w.d.AutomationOff = false
+	if n := e.tick(w); n != 1 {
+		t.Fatalf("claimed %d events with automation on", n)
+	}
+}
+
 func TestBookmarkCreated(t *testing.T) {
 	e := newEnv(t)
 	e.provider.Add(inbox())
