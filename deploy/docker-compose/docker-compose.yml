@@ -1,0 +1,28 @@
+# Build from the repository root's Dockerfile. Put the secrets in a .env file
+# next to this one (never commit it). Required variables:
+#   RAINWISE_API_TOKEN, RAINDROP_TOKEN, RAINDROP_WEBHOOK_SECRET,
+#   RAINWISE_MODEL, OPENROUTER_API_KEY
+services:
+  rainwise:
+    build:
+      context: ../..
+    image: rainwise:dev
+    command: ["serve", "--config", "/etc/rainwise/config.yaml"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      RAINWISE_API_TOKEN: ${RAINWISE_API_TOKEN:?set RAINWISE_API_TOKEN}
+      RAINDROP_TOKEN: ${RAINDROP_TOKEN:?set RAINDROP_TOKEN}
+      RAINDROP_WEBHOOK_SECRET: ${RAINDROP_WEBHOOK_SECRET:?set RAINDROP_WEBHOOK_SECRET}
+      RAINWISE_MODEL: ${RAINWISE_MODEL:?set RAINWISE_MODEL}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY}
+    volumes:
+      - rainwise-data:/data
+      - ./config.yaml:/etc/rainwise/config.yaml:ro
+    # The app gives in-flight items 30s to finish after SIGTERM. Docker's default
+    # of 10s would kill it first.
+    stop_grace_period: 40s
+
+volumes:
+  rainwise-data:

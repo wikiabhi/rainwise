@@ -1,0 +1,8 @@
+.git
+.superpowers
+bin
+*.db
+*.db-*
+deploy
+docs
+**/*_test.go

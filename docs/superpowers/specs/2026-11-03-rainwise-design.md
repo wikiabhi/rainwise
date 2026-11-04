@@ -86,7 +86,7 @@ Milestone 0 is a short spike against live services. Each item has a fallback, so
 
 | # | Unknown | Fallback |
 |---|---|---|
-| 1 | Does `lastUpdate:` work through the API `search` parameter? | Full scan each sync. 5,000 bookmarks is 100 requests. |
+| 1 | Does `lastUpdate:` work through the API `search` parameter? | Full list each sync, with no per-bookmark reads when nothing changed. 5,000 bookmarks is 100 requests. |
 | 2 | Do API writes bump `lastUpdate`? | The input hash makes this harmless either way. |
 | 3 | Which fields do IFTTT triggers expose? Is the bookmark ID included? | The canonical payload accepts a URL, which is resolved through search. |
 | 4 | Is there a Raindrop tag-list endpoint, and is it usable? | Build the vocabulary from listed bookmarks. |
@@ -146,6 +146,7 @@ type Bookmark struct {
     CreatedAt   time.Time
     UpdatedAt   time.Time
     Metadata    map[string]string // opaque to core
+    Highlights  []Highlight       // when the read included them; nil means it didn't say
 }
 
 type Highlight struct {
@@ -347,7 +348,7 @@ Status codes: `200`, `201`, `202` (accepted, async), `400` (malformed), `401`, `
 | `GET /healthz` | Liveness and store check |
 | `POST /v1/webhooks/{provider}` | Ingest events. `202` once saved. |
 | `POST /v1/jobs` | Create a job. `202`. |
-| `GET /v1/jobs`, `GET /v1/jobs/{id}` | List jobs, or get status and progress |
+| `GET /v1/jobs`, `GET /v1/jobs/{id}` | List jobs, or get status and progress. `GET /v1/jobs?active=true` returns the running jobs in one page, with no cursor. |
 | `DELETE /v1/jobs/{id}` | Cancel. `202`, or `409` if already finished. |
 | `GET /v1/jobs/{id}/decisions` | Per-bookmark plan or result |
 | `GET /v1/jobs/{id}/proposed-tags` | A dry run's new tags, with counts |
@@ -474,7 +475,7 @@ A later bookmark that doesn't fit goes to Needs Review, with the classifier's su
 
 - Normalized: trim, drop a leading `#`, lowercase, spaces to hyphens, apply `tag_aliases`. Existing user tags keep their exact form and are compared case-insensitively.
 - `TagVocab` is the 200 most-used tags (configurable) and seeds the prompt, which asks for reuse.
-- `max_tags` applies to the total. `room = max(0, max_tags - existing)`. A bookmark with 5 or more tags gets none added, and none removed.
+- `max_tags` applies to the total. `room = max(0, max_tags - existing)`. A bookmark already at `max_tags` gets none added, and none removed.
 - With `allow_new_tags: false`, or with Jev, only tags in the vocabulary are kept.
 - `min_tags` is a target. The validator never invents tags to reach it. A shortfall is recorded on the decision.
 - Normalizing also folds simple plurals to one form, so `llms` and `llm` match. New tags accepted during a run join that run's vocabulary, so later bookmarks reuse them **(design call)**.
@@ -518,7 +519,7 @@ The third row is deliberate: Needs Review doesn't pull a bookmark out of a good 
 
 `pipeline.Process(ctx, WorkItem, Options)` is the one code path for all triggers. `Options` carries `MoveAllowed`, `DryRun`, `Force`, and taxonomy.
 
-1. Resolve the provider. Fetch the bookmark and its highlights. If gone, mark it deleted and stop.
+1. Resolve the provider. Fetch the bookmark and its highlights. If gone, mark it deleted and stop. Sync, backfill and reclassify use the copy they just listed, unless it disagrees with the recorded collection or a write is pending; then they read it afresh.
 2. Load state and detect manual moves (section 10).
 3. Compute the input hash. Skip if already handled.
 4. Decide whether a collection decision is wanted. Fetch content if needed (section 9.6).
@@ -551,7 +552,7 @@ Every pin has a source: `baseline`, or `user` for a detected manual move or a ne
 
 - **First backfill:** the user said it may move anything, and that manual moves become final after it. So it ignores every pin created before its cutoff. The cutoff is the job's start, or the dry run's start when using `from_dry_run`, so corrections made after a dry run are honored. Moves made during the job are honored too.
 - **Later backfills and reclassify:** respect `user` pins and ignore `baseline` pins. `include_pinned` overrides this for reclassify.
-- **Tracking:** `settings` stores when the first real backfill for a provider finished. A restore to a snapshot taken before that clears it, so the next backfill is a first backfill again.
+- **Tracking:** `settings` stores when the first real backfill for a provider finished. Whole-library snapshots record this value, and restoring one puts it back, so a restore to a snapshot taken before that makes the next backfill a first backfill again, and undoing that restore reverses it. Restoring a scoped snapshot leaves it alone.
 
 ### 9.2 Webhook
 
@@ -569,10 +570,12 @@ Scheduled and also the safety net for webhooks. Runs under the built-in schedule
 
 1. Read the watermark. List bookmarks with `Since = watermark - 48h`, or do a full list if `IncrementalSince` is false.
 2. Run each through the pipeline. The input hash removes repeats, including those caused by our own writes.
-3. Read recent highlights, if supported, and queue tags-only runs for parents with new highlights.
-4. Advance the watermark to the job's start time only on success.
+3. Find recent highlights, if supported, and queue tags-only runs for parents with new highlights. A full listing that includes each bookmark's highlights shows them. Otherwise read the highlight feed.
+4. Advance the watermark to the job's start time. An incremental listing does this only if no item failed; a full listing does it whenever it completes, because the next one revisits failed items.
 
-**Baseline:** a first sync with no watermark records bookmarks outside the inbox as known and pinned with source `baseline`, without classifying them. Only inbox items are processed. This prevents a surprise bill and tag changes **(design call)**. Section 9.1a covers how backfills treat these pins.
+The tag vocabulary is the persisted one. A backfill refreshes it, sync builds it only if it is absent, and real runs append the new tags they write.
+
+**Baseline:** a first sync records bookmarks outside the inbox as known and pinned with source `baseline`, without classifying them. Only inbox items are processed. This prevents a surprise bill and tag changes **(design call)**. The first completed listing ends the baseline, whatever its item failures, as recorded in the `sync_baseline_done` setting. Section 9.1a covers how backfills treat these pins.
 
 Sync doesn't re-sort on taxonomy changes. That's what `reclassify` is for, so costs stay predictable.
 
@@ -743,7 +746,7 @@ One process runs one provider in the MVP. The code keys everything by provider, 
 - A small Worker forwards API and webhook traffic to the container, and has a cron trigger for `POST /v1/jobs` (sync).
 - The app's built-in scheduler stays off here, because a sleeping container can't fire timers.
 - [Litestream](https://litestream.io) replicates SQLite to R2 over its S3 API and [restores at startup](https://docs.openclaw.ai/install/cloudflare), before the app starts. It's in the image's entrypoint for this deployment only.
-- **A running job must keep the container awake.** The Worker's cron runs every 5 minutes, and the sleep timeout is longer than this while a job is active. When none is active, the container may sleep and the next cron or webhook wakes it. The exact mechanism is left to the builder and verified in a deployed test.
+- **A running job must keep the container awake.** The Worker's cron runs every 30 minutes (matching `sync_every`) and only creates the sync job. When the container's `sleepAfter` (about 10 minutes) expires, the Container class asks the app whether a job is running (`GET /v1/jobs?active=true`): if so it stays up for another period, otherwise it stops, and the next cron or webhook wakes it. The exact mechanism is left to the builder and verified in a deployed test.
 - Containers may be beta; that's a risk accepted by the user's choice of platform. The docker-compose path is the alternative.
 
 ## 14. Project Structure
