@@ -1,6 +1,6 @@
 # Live checks
 
-**None of these checks have been run.** Rainwise was built and tested against fakes and `httptest` servers only. No request has been sent to Raindrop, an LLM gateway, Jev, IFTTT or Cloudflare. Run this list yourself before you trust the tool with a real library, and tick the boxes as you go.
+**Most of these checks have not been run.** Boxes ticked below were run on 2026-11-04 with read-only requests to a real Raindrop library of 102 bookmarks, or with a test prompt to OpenRouter. Rainwise itself has not yet run against a live service, and no write has been tested. Run the rest before you trust the tool with a real library, and tick the boxes as you go.
 
 Rules for running it:
 
@@ -12,7 +12,9 @@ Raindrop API base: `https://api.raindrop.io/rest/v1`.
 
 ## Part 1: provider and gateway unknowns (design section 3.4)
 
-### [ ] 1. Does `lastUpdate:` work through the API `search` parameter?
+### [x] 1. Does `lastUpdate:` work through the API `search` parameter?
+
+**Result (2026-11-04): yes, with `>`.** `lastUpdate:>2026-06-06` returned 55 of 102 bookmarks, matching a local count of those updated on or after that date, so it includes the date itself. `lastUpdate:2026-06-06` and the JSON form matched only that one day (7). The adapter uses the `>` form, so `incremental_since: true` is safe. The commands below use the exact-day forms; add `>` to reproduce this.
 
 ```sh
 curl -s -H "Authorization: Bearer $RAINDROP_TOKEN" \
@@ -44,7 +46,9 @@ Follow `docs/ifttt.md`, create the applet, trigger it once, and read what the re
 - Only a URL: map it to `resource.url`. Rainwise resolves URLs through search, which costs one extra request per event.
 - Neither: IFTTT cannot drive Rainwise. Rely on scheduled sync.
 
-### [ ] 4. Is there a usable tag-list endpoint?
+### [x] 4. Is there a usable tag-list endpoint?
+
+**Result (2026-11-04): yes.** Tags and counts matched a count over every listed bookmark. Set `tag_listing: true`.
 
 ```sh
 curl -s -H "Authorization: Bearer $RAINDROP_TOKEN" https://api.raindrop.io/rest/v1/tags | head -c 600
@@ -52,7 +56,7 @@ curl -s -H "Authorization: Bearer $RAINDROP_TOKEN" https://api.raindrop.io/rest/
 
 Expect `{"items":[{"_id":"tag","count":N}, ...]}`. Rainwise's adapter calls `GET /tags`, so this check also answers whether `GET /tags` works.
 
-- Works, counts look right: set `providers.raindrop.tag_listing: true`. Backfills and webhook items then take the tag vocabulary from this endpoint. Sync uses the saved vocabulary.
+- Works, counts look right: set `providers.raindrop.tag_listing: true`. Backfills, syncs and webhook items then take the tag vocabulary from this endpoint, for one request per sync.
 - Fails or counts are missing: leave it `false`. The vocabulary is built from listed bookmarks.
 
 ### [ ] 5. Can Jev be reached through OpenRouter or a Cloudflare route?
@@ -62,7 +66,9 @@ Only matters if you want Jev. Send one tiny request through each route you have 
 - Works: add a `jev` classifier in your config and use it for a role.
 - Doesn't, or no access: keep the `jev` entry out of your config. The adapter stays unused.
 
-### [ ] 6. Does your chosen route enforce JSON schema?
+### [x] 6. Does your chosen route enforce JSON schema?
+
+**Result (2026-11-04): yes** for `openai/gpt-oss-20b` on OpenRouter with `require_parameters`: it returned `{"confidence":0.5}`. One test prompt only, so it doesn't show how well the model classifies.
 
 ```sh
 curl -s "$LLM_BASE_URL/chat/completions" -H "Authorization: Bearer $LLM_KEY" -H 'Content-Type: application/json' -d '{
@@ -83,7 +89,9 @@ Only for the Cloudflare deployment. Check whether the pinned Litestream version 
 - Yes: change `deploy/cloudflare/entrypoint.sh` to use it.
 - No: keep `state.durable_wait: 30s` and confirm in R2 that the snapshot's data appears within that window.
 
-### [ ] 8. How do rate-limit headers look with a test token?
+### [x] 8. How do rate-limit headers look with a test token?
+
+**Result (2026-11-04):** `x-ratelimit-limit: 120`, as documented. The default of 100 is fine.
 
 ```sh
 curl -si -H "Authorization: Bearer $RAINDROP_TOKEN" https://api.raindrop.io/rest/v1/user | grep -i 'ratelimit\|retry'
@@ -93,14 +101,18 @@ Raindrop documents 120 requests per minute. The client limits itself to `provide
 
 ## Part 2: additional checks
 
-### [ ] A. Does the chosen model accept `minimum` and `maximum` in strict JSON schema?
+### [x] A. Does the chosen model accept `minimum` and `maximum` in strict JSON schema?
+
+**Result (2026-11-04): accepted** by `openai/gpt-oss-20b` on OpenRouter.
 
 The classifier's decision schema (`internal/adapters/classifier/llm/schema.go`) puts `"minimum": 0, "maximum": 1` on `confidence`. Some strict-mode implementations reject those keywords. Use the check 6 command with `"confidence":{"type":"number","minimum":0,"maximum":1}`.
 
 - Accepted: nothing to do.
 - Rejected with a 400: that model cannot be used as is. Either pick another model or remove the two keywords in `schema.go` (the validator already clamps and checks confidence locally).
 
-### [ ] B. Does `GET /tags` work?
+### [x] B. Does `GET /tags` work?
+
+**Result (2026-11-04): yes**, see check 4.
 
 Same as check 4. Listed separately so you record the outcome for the adapter.
 
@@ -125,7 +137,9 @@ Rainwise treats a 2xx with `"result":false` as a failed write, and as not found 
 - A 4xx, or `"result":false`: fine, the write is reported as failed.
 - A 200 with `"result":true` and the bookmark left alone or sent elsewhere: the write looks successful when it isn't. Keep taxonomy collections from being deleted while Rainwise runs, and report it as a bug to fix in the adapter.
 
-### [ ] F. Do list responses include highlights the way a single read does?
+### [x] F. Do list responses include highlights the way a single read does?
+
+**Result (2026-11-04): yes, on a small sample.** All 102 listed bookmarks had the field and a `created` date, and each highlight had `created` too. Only one bookmark had a highlight, and its list and single-read counts matched (1), with the feed also showing one. So an idle sync should need list requests only. Compare again if you have more highlighted bookmarks.
 
 ```sh
 curl -s -H "Authorization: Bearer $RAINDROP_TOKEN" "https://api.raindrop.io/rest/v1/raindrops/0?perpage=50" \

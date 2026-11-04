@@ -573,7 +573,7 @@ Scheduled and also the safety net for webhooks. Runs under the built-in schedule
 3. Find recent highlights, if supported, and queue tags-only runs for parents with new highlights. A full listing that includes each bookmark's highlights shows them. Otherwise read the highlight feed.
 4. Advance the watermark to the job's start time. An incremental listing does this only if no item failed; a full listing does it whenever it completes, because the next one revisits failed items.
 
-The tag vocabulary is the persisted one. A backfill refreshes it, sync builds it only if it is absent, and real runs append the new tags they write.
+The tag vocabulary comes from the provider's tag listing when it has one, read once per sync. Otherwise it is the persisted one: a backfill refreshes it, sync builds it only if it is absent, and real runs append the new tags they write.
 
 **Baseline:** a first sync records bookmarks outside the inbox as known and pinned with source `baseline`, without classifying them. Only inbox items are processed. This prevents a surprise bill and tag changes **(design call)**. The first completed listing ends the baseline, whatever its item failures, as recorded in the `sync_baseline_done` setting. Section 9.1a covers how backfills treat these pins.
 

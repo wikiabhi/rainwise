@@ -1187,7 +1187,8 @@ func TestIdleSyncRequestCount(t *testing.T) {
 	if got, want := after.List-before.List, bookmarks/50+1; got != want {
 		t.Errorf("list calls = %d, want %d", got, want)
 	}
-	if after.Get != before.Get || after.Highlights != before.Highlights || after.HighlightFeed != before.HighlightFeed || after.Tags != before.Tags {
+	// One tag listing per sync, for a provider that has one, and nothing per bookmark.
+	if after.Get != before.Get || after.Highlights != before.Highlights || after.HighlightFeed != before.HighlightFeed || after.Tags != before.Tags+1 {
 		t.Errorf("per-item or extra reads: before %+v, after %+v", before, after)
 	}
 	if e.c.total() != calls || job.Progress.Failed != 0 {
