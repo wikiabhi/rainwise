@@ -25,14 +25,20 @@ func responseFormat(name string, schema map[string]any) map[string]any {
 func decisionSchema(r ports.ClassifyRequest) map[string]any {
 	props := map[string]any{}
 	if r.WantCollection {
-		keys := []any{""}
+		fixed := r.Taxonomy.Mode == domain.ModeFixed
+		keys := []any{}
+		if !fixed {
+			keys = append(keys, "")
+		}
 		for _, c := range r.Taxonomy.Collections {
 			if c.Role != roleReview {
 				keys = append(keys, c.Key)
 			}
 		}
 		props["collection"] = map[string]any{"type": "string", "enum": keys}
-		props["proposed_name"] = map[string]any{"type": "string"}
+		if !fixed {
+			props["proposed_name"] = map[string]any{"type": "string"}
+		}
 	}
 	if r.TagsWanted > 0 {
 		props["tags"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}}

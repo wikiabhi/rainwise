@@ -32,7 +32,11 @@ func classifySystem(r ports.ClassifyRequest) string {
 			fmt.Fprintf(&b, "- key: %s | name: %s | %s\n", c.Key, c.Name, c.Description)
 		}
 		b.WriteString("Choose by what the bookmark is for, not only its topic: a job posting belongs with jobs even when it names a technology.\n")
-		b.WriteString("If none fits, leave \"collection\" empty and put a short suggested collection name in \"proposed_name\". Otherwise leave \"proposed_name\" empty.\n")
+		if r.Taxonomy.Mode == domain.ModeFixed {
+			b.WriteString("These are the only collections. If none fits well, choose the closest and give a low confidence.\n")
+		} else {
+			b.WriteString("If none fits, leave \"collection\" empty and put a short suggested collection name in \"proposed_name\". Otherwise leave \"proposed_name\" empty.\n")
+		}
 	}
 	if r.TagsWanted > 0 {
 		fmt.Fprintf(&b, "\nSuggest up to %d tags, most relevant first. Tags name the specific subjects of this page: technologies, products, techniques and concepts, such as postgres, rate-limiting or rag. Avoid broad words such as learning, software or engineering.\n", r.TagsWanted)

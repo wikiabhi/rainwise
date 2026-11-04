@@ -688,6 +688,7 @@ func (p *Pipeline) classifyWith(ctx context.Context, c ports.Classifier, r *run,
 		Taxonomy: domain.TaxonomySnapshot{
 			ID:          r.tax.ID,
 			Version:     r.tax.Version,
+			Mode:        r.tax.Mode,
 			Collections: r.tax.Collections,
 			Rules:       r.tax.Rules,
 		},

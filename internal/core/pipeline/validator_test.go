@@ -182,3 +182,44 @@ func TestValidateProposal(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateDropsTagsThatRepeatTheCollection(t *testing.T) {
+	t.Run("the chosen collection's key or name", func(t *testing.T) {
+		in := baseInput()
+		in.Taxonomy.Collections[0] = domain.TaxonomyCollection{Key: "dev_tools", Name: "Dev Tools"}
+		in.Decision.Collection.Key = "dev_tools"
+		in.Resolved = map[string]domain.ID{"dev_tools": idTech}
+		in.Decision.Tags = tags("dev-tools", "Dev_Tools", "kafka", "go")
+		got := Validate(in)
+		if !slices.Equal(got.AddTags, []string{"kafka", "go"}) {
+			t.Errorf("AddTags = %v", got.AddTags)
+		}
+	})
+	t.Run("another collection's name is still a fair topic", func(t *testing.T) {
+		in := baseInput()
+		in.Taxonomy.Collections = append(in.Taxonomy.Collections, domain.TaxonomyCollection{Key: "backend", Name: "Backend"})
+		in.Decision.Tags = tags("backend", "go")
+		if got := Validate(in); !slices.Equal(got.AddTags, []string{"backend", "go"}) {
+			t.Errorf("AddTags = %v", got.AddTags)
+		}
+	})
+	t.Run("a tags-only run compares with the current collection", func(t *testing.T) {
+		in := baseInput()
+		in.WantCollection = false
+		in.Decision.Collection = domain.CollectionChoice{}
+		in.Bookmark.Collection = idTech
+		in.Decision.Tags = tags("tech", "go")
+		if got := Validate(in); !slices.Equal(got.AddTags, []string{"go"}) {
+			t.Errorf("AddTags = %v", got.AddTags)
+		}
+	})
+	t.Run("a tag the user already has is kept", func(t *testing.T) {
+		in := baseInput()
+		in.Bookmark.Tags = []string{"tech"}
+		in.Decision.Tags = tags("go")
+		got := Validate(in)
+		if !slices.Equal(got.AddTags, []string{"go"}) || len(got.Reasons) != 0 {
+			t.Errorf("AddTags = %v, reasons = %v", got.AddTags, got.Reasons)
+		}
+	})
+}

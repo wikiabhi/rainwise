@@ -6,8 +6,8 @@ import (
 	"sync"
 )
 
-// Normalize trims, drops a leading '#', lowercases, turns whitespace into
-// hyphens, and applies aliases. It returns "" for an empty tag.
+// Normalize trims, drops a leading '#', lowercases, turns whitespace and underscores
+// into hyphens, and applies aliases. It returns "" for an empty tag.
 func Normalize(tag string, aliases map[string]string) string {
 	n := clean(tag)
 	if n == "" {
@@ -28,7 +28,7 @@ func clean(tag string) string {
 	s := strings.TrimSpace(tag)
 	s = strings.TrimLeft(s, "#")
 	s = strings.ToLower(strings.Join(strings.Fields(s), "-"))
-	return s
+	return strings.ReplaceAll(s, "_", "-")
 }
 
 // ComparisonKey folds case, word breaks and simple plurals, so "System Design",

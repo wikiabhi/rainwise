@@ -130,3 +130,9 @@ func TestComparisonKeyIgnoresWordBreaks(t *testing.T) {
 		t.Error("different tags must stay different")
 	}
 }
+
+func TestNormalizeTurnsUnderscoresIntoHyphens(t *testing.T) {
+	if got := Normalize("Dev_Tools", nil); got != "dev-tools" {
+		t.Errorf("Normalize = %q", got)
+	}
+}

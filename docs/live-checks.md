@@ -1,6 +1,6 @@
 # Live checks
 
-**Most of these checks have not been run.** Boxes ticked below were run on 2026-11-04 with read-only requests to a real Raindrop library of 102 bookmarks, with a test prompt to OpenRouter, or as a Rainwise dry run in Docker. **No write has been tested.** Run the rest before you trust the tool with a real library, and tick the boxes as you go.
+**Most of these checks have not been run.** Boxes ticked below were run on 2026-11-04 with read-only requests to a real Raindrop library of 102 bookmarks, with a test prompt to OpenRouter, or as a Rainwise job in Docker. **Writes have been tested on 2 bookmarks only.** Run the rest before you trust the tool with a real library, and tick the boxes as you go.
 
 Rules for running it:
 
@@ -31,7 +31,9 @@ Compare `count` and the `lastUpdate` fields against an unfiltered call, using a 
 
 Note the filter has one-day granularity, which is why sync backs off 48 hours.
 
-### [ ] 2. Do API writes bump `lastUpdate`?
+### [x] 2. Do API writes bump `lastUpdate`?
+
+**Result (2026-11-04): yes.** The apply and the restore changed `lastUpdate` on the 2 bookmarks they wrote, and it stayed changed after the restore.
 
 On the throwaway account: note a bookmark's `lastUpdate`, add a tag through `PUT /raindrop/{id}`, read it again.
 
@@ -174,6 +176,8 @@ curl -s -H "Authorization: Bearer $RAINWISE_API_TOKEN" "$RAINWISE_URL/v1/jobs/JO
 Pass: the job finishes, `/decisions` lists a collection and tags per bookmark, and Raindrop shows no changes (collections and tags as before).
 
 ### [ ] D2. Applied backfill sorts the library; restore returns it exactly
+
+**Partial result (2026-11-04): pass at small scale.** On a real library, a backfill scoped to a 2-bookmark collection moved and tagged only those 2 and created the 9 taxonomy collections, leaving the other 100 unchanged. The restore returned all 102 to their original collection, tags (compared sorted), title and link, deleted the 9 collections and removed the 4 test tags. `lastUpdate` stays changed on the 2 written bookmarks. Manual sort order wasn't compared. A whole-library apply and restore is still untested.
 
 Apply the reviewed plan with `from_dry_run` and `approved_new_tags` (see the README). Then run a restore dry run and a real restore with the snapshot id from the backfill job.
 

@@ -45,3 +45,30 @@ func TestClassifySystemVocabularyOnlyStillForbidsNewTags(t *testing.T) {
 		t.Errorf("prompt lacks the vocabulary-only rule:\n%s", got)
 	}
 }
+
+func TestFixedTaxonomyCannotProposeCollections(t *testing.T) {
+	r := guidanceRequest()
+	r.Taxonomy.Mode = domain.ModeFixed
+	r.Taxonomy.Collections = []domain.TaxonomyCollection{{Key: "dev", Name: "Dev"}}
+	if got := classifySystem(r); strings.Contains(got, "proposed_name") || !strings.Contains(got, "closest") {
+		t.Errorf("prompt offers a new collection:\n%s", got)
+	}
+	schema := decisionSchema(r)["properties"].(map[string]any)
+	if _, ok := schema["proposed_name"]; ok {
+		t.Error("schema offers proposed_name")
+	}
+	if enum := schema["collection"].(map[string]any)["enum"].([]any); len(enum) != 1 || enum[0] != "dev" {
+		t.Errorf("enum = %v", enum)
+	}
+}
+
+func TestDynamicTaxonomyCanProposeCollections(t *testing.T) {
+	r := guidanceRequest()
+	r.Taxonomy.Mode = domain.ModeDynamic
+	if !strings.Contains(classifySystem(r), "proposed_name") {
+		t.Error("prompt lost proposed_name")
+	}
+	if _, ok := decisionSchema(r)["properties"].(map[string]any)["proposed_name"]; !ok {
+		t.Error("schema lost proposed_name")
+	}
+}
