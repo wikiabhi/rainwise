@@ -4,10 +4,11 @@ package taxonomy
 import (
 	"strings"
 	"sync"
+	"unicode"
 )
 
-// Normalize trims, drops a leading '#', lowercases, turns whitespace into
-// hyphens, and applies aliases. It returns "" for an empty tag.
+// Normalize trims, drops a leading '#', lowercases, turns whitespace and underscores
+// into hyphens, and applies aliases. It returns "" for an empty tag.
 func Normalize(tag string, aliases map[string]string) string {
 	n := clean(tag)
 	if n == "" {
@@ -24,19 +25,47 @@ func Normalize(tag string, aliases map[string]string) string {
 	return n
 }
 
+// maxTagLen is generous: real tags are a few words, and anything longer is a model
+// that has lost its way.
+const maxTagLen = 40
+
+// ValidTag reports whether a normalized tag looks like a tag: letters and digits,
+// joined by hyphens or dots, with + or # allowed, as in c++ and c#. Models sometimes
+// emit fragments of their own output, which must never reach a library.
+func ValidTag(tag string) bool {
+	runes := []rune(tag)
+	if len(runes) == 0 || len(runes) > maxTagLen {
+		return false
+	}
+	alnum := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+	if !alnum(runes[0]) {
+		return false
+	}
+	last := runes[len(runes)-1]
+	if !alnum(last) && last != '+' && last != '#' {
+		return false
+	}
+	for _, r := range runes {
+		if !alnum(r) && !strings.ContainsRune("-.+#", r) {
+			return false
+		}
+	}
+	return true
+}
+
 func clean(tag string) string {
 	s := strings.TrimSpace(tag)
 	s = strings.TrimLeft(s, "#")
 	s = strings.ToLower(strings.Join(strings.Fields(s), "-"))
-	return s
+	return strings.NewReplacer("_", "-", "\u2010", "-", "\u2011", "-", "\u2012", "-", "\u2013", "-", "\u2014", "-").Replace(s)
 }
 
-// ComparisonKey folds case, word separators and simple plurals, so "System Design",
-// "system-design" and "system_designs" are one tag. It is for comparison only and
+// ComparisonKey folds case, word breaks and simple plurals, so "System Design",
+// "system-design", "systemdesign" and "system_designs" are one tag. It is for comparison only and
 // is never written to a tag.
 func ComparisonKey(tag string) string {
-	s := strings.ToLower(strings.Join(strings.Fields(tag), "-"))
-	s = strings.ReplaceAll(s, "_", "-")
+	s := strings.ToLower(strings.Join(strings.Fields(tag), ""))
+	s = strings.NewReplacer("_", "", "-", "").Replace(s)
 	if len(s) > 3 && strings.HasSuffix(s, "s") &&
 		!strings.HasSuffix(s, "ss") && !strings.HasSuffix(s, "us") && !strings.HasSuffix(s, "is") {
 		s = s[:len(s)-1]

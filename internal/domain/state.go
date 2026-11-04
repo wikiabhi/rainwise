@@ -142,6 +142,7 @@ type Taxonomy struct {
 type TaxonomySnapshot struct {
 	ID          string               `json:"id"`
 	Version     int                  `json:"version"`
+	Mode        string               `json:"mode"`
 	Collections []TaxonomyCollection `json:"collections"`
 	Rules       TaxonomyRules        `json:"rules"`
 }

@@ -194,3 +194,81 @@ func TestReclassifyInboxIDScope(t *testing.T) {
 		t.Errorf("collection = %v", got)
 	}
 }
+
+func TestReclassifyTagsOnly(t *testing.T) {
+	tagsOnly := func(j *domain.Job) { j.Params.TagsOnly = true }
+	setup := func(t *testing.T) *jobEnv {
+		e := newJobEnv(t)
+		e.addBookmark(1, colBeta)
+		e.addBookmark(2, colReview, "postgres", "kafka")
+		return e
+	}
+	scope := domain.Scope{IDs: []string{bmID(1).String()}}
+
+	t.Run("adds tags, never asks for or makes a move", func(t *testing.T) {
+		e := setup(t)
+		e.cls.Script(cfake.Result{Decision: classified("a", 0.9, "postgres", "kafka")})
+		job := e.reclassify(scope, tagsOnly)
+		if got := e.collectionOf(bmID(1)); got != colBeta {
+			t.Errorf("moved to %v", got)
+		}
+		if got := e.tagsOf(bmID(1)); !slices.Equal(got, []string{"postgres", "kafka"}) {
+			t.Errorf("tags = %v", got)
+		}
+		if e.cls.Requests()[0].WantCollection {
+			t.Error("asked the classifier for a collection")
+		}
+		if job.SnapshotID == "" {
+			t.Error("no snapshot, so it couldn't be undone")
+		}
+	})
+
+	t.Run("a dry run changes nothing, and its plan applies without a move", func(t *testing.T) {
+		e := setup(t)
+		e.cls.Script(cfake.Result{Decision: classified("a", 0.9, "postgres", "brand-new", "rejected")})
+		dry := e.reclassify(scope, func(j *domain.Job) { tagsOnly(j); j.DryRun = true })
+		if got := e.tagsOf(bmID(1)); len(got) != 0 {
+			t.Fatalf("dry run wrote tags %v", got)
+		}
+		calls := e.cls.Calls()
+		e.reclassify(scope, func(j *domain.Job) {
+			tagsOnly(j)
+			j.FromDryRun = dry.ID
+			j.Params.ApprovedNewTags = map[string]string{"brand-new": "brand-new"}
+		})
+		if got := e.cls.Calls(); got != calls {
+			t.Errorf("classified %d more times", got-calls)
+		}
+		if got := e.collectionOf(bmID(1)); got != colBeta {
+			t.Errorf("moved to %v", got)
+		}
+		if got := e.tagsOf(bmID(1)); !slices.Equal(got, []string{"postgres", "brand-new"}) {
+			t.Errorf("tags = %v", got)
+		}
+	})
+
+	t.Run("a tags-only plan can't be applied as a full reclassify", func(t *testing.T) {
+		e := setup(t)
+		e.cls.Script(cfake.Result{Decision: classified("a", 0.9, "postgres")})
+		dry := e.reclassify(scope, func(j *domain.Job) { tagsOnly(j); j.DryRun = true })
+		svc := NewService(ServiceDeps{Store: e.store, ProviderNames: []string{"fake"}, Now: e.nowFn})
+		_, _, err := svc.Create(context.Background(), CreateRequest{
+			Type: domain.JobReclassify, Provider: dry.Provider, Taxonomy: dry.TaxonomyID, Scope: scope, FromDryRun: dry.ID,
+		})
+		if !errors.Is(err, domain.ErrValidation) {
+			t.Errorf("err = %v, want a validation error", err)
+		}
+	})
+
+	t.Run("low confidence adds nothing and doesn't send it to review", func(t *testing.T) {
+		e := setup(t)
+		e.cls.Script(cfake.Result{Decision: classified("a", 0.1, "postgres")})
+		e.reclassify(scope, tagsOnly)
+		if got := e.collectionOf(bmID(1)); got != colBeta {
+			t.Errorf("moved to %v", got)
+		}
+		if got := e.tagsOf(bmID(1)); len(got) != 0 {
+			t.Errorf("tags = %v", got)
+		}
+	})
+}

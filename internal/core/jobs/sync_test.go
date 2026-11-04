@@ -1035,15 +1035,24 @@ func TestSyncVocabulary(t *testing.T) {
 		}
 	})
 
-	t.Run("no ListTags either", func(t *testing.T) {
+	t.Run("a tag listing is read on every sync, so hand-added tags are offered", func(t *testing.T) {
 		e := newJobEnv(t)
 		e.addBookmark(1, colBeta, "seen")
 		e.syncNow()
-		tags := e.provider.Calls().Tags
 		e.setNow(t0.Add(time.Hour))
+		e.addBookmark(2, colBeta, "hand-added")
+		e.addBookmark(3, pfake.Inbox)
+		e.cls.Script(cfake.Result{Decision: classified("a", 0.9)})
+		lists, tags, calls := e.provider.Calls().List, e.provider.Calls().Tags, e.cls.Calls()
 		e.syncNow()
-		if got := e.provider.Calls().Tags; got != tags {
-			t.Errorf("ListTags ran %d more times", got-tags)
+		if got := e.provider.Calls().Tags - tags; got != 1 {
+			t.Errorf("ListTags ran %d times, want 1", got)
+		}
+		if got := e.provider.Calls().List - lists; got != 1 {
+			t.Errorf("lists = %d, want the pass alone", got)
+		}
+		if got := e.cls.Requests()[calls].TagVocab; !slices.Contains(got, "hand-added") {
+			t.Errorf("classifier's vocab = %v, want hand-added", got)
 		}
 	})
 

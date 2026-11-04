@@ -29,6 +29,7 @@ type JobParams struct {
 	ProposeOnly     bool              `json:"propose_only,omitempty"`
 	Force           bool              `json:"force,omitempty"`
 	IncludePinned   bool              `json:"include_pinned,omitempty"`
+	TagsOnly        bool              `json:"tags_only,omitempty"`
 	SnapshotID      string            `json:"snapshot_id,omitempty"`
 	ApprovedNewTags map[string]string `json:"approved_new_tags,omitempty"`
 }

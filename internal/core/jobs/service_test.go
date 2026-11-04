@@ -102,6 +102,7 @@ func TestCreateValidation(t *testing.T) {
 			r.Type = domain.JobReclassify
 			r.Scope = domain.Scope{Tags: []string{"x"}}
 		}), nil},
+		{"tags_only on a backfill", mod(func(r *CreateRequest) { r.Params.TagsOnly = true }), domain.ErrValidation},
 		{"propose_only on a real backfill", mod(func(r *CreateRequest) { r.Params.ProposeOnly = true }), domain.ErrValidation},
 		{"propose_only on a dry-run sync", mod(func(r *CreateRequest) {
 			r.Type = domain.JobSync

@@ -1,6 +1,6 @@
 # Live checks
 
-**None of these checks have been run.** Rainwise was built and tested against fakes and `httptest` servers only. No request has been sent to Raindrop, an LLM gateway, Jev, IFTTT or Cloudflare. Run this list yourself before you trust the tool with a real library, and tick the boxes as you go.
+**Most of these checks have not been run.** Boxes ticked below were run on 2026-11-04 with read-only requests to a real Raindrop library of 102 bookmarks, with a test prompt to OpenRouter, or as a Rainwise job in Docker. **Restore has been tested on 2 bookmarks only.** Run the rest before you trust the tool with a real library, and tick the boxes as you go.
 
 Rules for running it:
 
@@ -12,7 +12,9 @@ Raindrop API base: `https://api.raindrop.io/rest/v1`.
 
 ## Part 1: provider and gateway unknowns (design section 3.4)
 
-### [ ] 1. Does `lastUpdate:` work through the API `search` parameter?
+### [x] 1. Does `lastUpdate:` work through the API `search` parameter?
+
+**Result (2026-11-04): yes, with `>`.** `lastUpdate:>2026-06-06` returned 55 of 102 bookmarks, matching a local count of those updated on or after that date, so it includes the date itself. `lastUpdate:2026-06-06` and the JSON form matched only that one day (7). The adapter uses the `>` form, so `incremental_since: true` is safe. The commands below use the exact-day forms; add `>` to reproduce this.
 
 ```sh
 curl -s -H "Authorization: Bearer $RAINDROP_TOKEN" \
@@ -29,7 +31,9 @@ Compare `count` and the `lastUpdate` fields against an unfiltered call, using a 
 
 Note the filter has one-day granularity, which is why sync backs off 48 hours.
 
-### [ ] 2. Do API writes bump `lastUpdate`?
+### [x] 2. Do API writes bump `lastUpdate`?
+
+**Result (2026-11-04): yes.** The apply and the restore changed `lastUpdate` on the 2 bookmarks they wrote, and it stayed changed after the restore.
 
 On the throwaway account: note a bookmark's `lastUpdate`, add a tag through `PUT /raindrop/{id}`, read it again.
 
@@ -44,7 +48,9 @@ Follow `docs/ifttt.md`, create the applet, trigger it once, and read what the re
 - Only a URL: map it to `resource.url`. Rainwise resolves URLs through search, which costs one extra request per event.
 - Neither: IFTTT cannot drive Rainwise. Rely on scheduled sync.
 
-### [ ] 4. Is there a usable tag-list endpoint?
+### [x] 4. Is there a usable tag-list endpoint?
+
+**Result (2026-11-04): yes.** Tags and counts matched a count over every listed bookmark. Set `tag_listing: true`.
 
 ```sh
 curl -s -H "Authorization: Bearer $RAINDROP_TOKEN" https://api.raindrop.io/rest/v1/tags | head -c 600
@@ -52,7 +58,7 @@ curl -s -H "Authorization: Bearer $RAINDROP_TOKEN" https://api.raindrop.io/rest/
 
 Expect `{"items":[{"_id":"tag","count":N}, ...]}`. Rainwise's adapter calls `GET /tags`, so this check also answers whether `GET /tags` works.
 
-- Works, counts look right: set `providers.raindrop.tag_listing: true`. Backfills and webhook items then take the tag vocabulary from this endpoint. Sync uses the saved vocabulary.
+- Works, counts look right: set `providers.raindrop.tag_listing: true`. Backfills, syncs and webhook items then take the tag vocabulary from this endpoint, for one request per sync.
 - Fails or counts are missing: leave it `false`. The vocabulary is built from listed bookmarks.
 
 ### [ ] 5. Can Jev be reached through OpenRouter or a Cloudflare route?
@@ -62,7 +68,9 @@ Only matters if you want Jev. Send one tiny request through each route you have 
 - Works: add a `jev` classifier in your config and use it for a role.
 - Doesn't, or no access: keep the `jev` entry out of your config. The adapter stays unused.
 
-### [ ] 6. Does your chosen route enforce JSON schema?
+### [x] 6. Does your chosen route enforce JSON schema?
+
+**Result (2026-11-04): yes** for `openai/gpt-oss-20b` on OpenRouter with `require_parameters`: it returned `{"confidence":0.5}`. One test prompt only, so it doesn't show how well the model classifies.
 
 ```sh
 curl -s "$LLM_BASE_URL/chat/completions" -H "Authorization: Bearer $LLM_KEY" -H 'Content-Type: application/json' -d '{
@@ -83,7 +91,9 @@ Only for the Cloudflare deployment. Check whether the pinned Litestream version 
 - Yes: change `deploy/cloudflare/entrypoint.sh` to use it.
 - No: keep `state.durable_wait: 30s` and confirm in R2 that the snapshot's data appears within that window.
 
-### [ ] 8. How do rate-limit headers look with a test token?
+### [x] 8. How do rate-limit headers look with a test token?
+
+**Result (2026-11-04):** `x-ratelimit-limit: 120`, as documented. The default of 100 is fine.
 
 ```sh
 curl -si -H "Authorization: Bearer $RAINDROP_TOKEN" https://api.raindrop.io/rest/v1/user | grep -i 'ratelimit\|retry'
@@ -93,18 +103,24 @@ Raindrop documents 120 requests per minute. The client limits itself to `provide
 
 ## Part 2: additional checks
 
-### [ ] A. Does the chosen model accept `minimum` and `maximum` in strict JSON schema?
+### [x] A. Does the chosen model accept `minimum` and `maximum` in strict JSON schema?
+
+**Result (2026-11-04): accepted** by `openai/gpt-oss-20b` on OpenRouter.
 
 The classifier's decision schema (`internal/adapters/classifier/llm/schema.go`) puts `"minimum": 0, "maximum": 1` on `confidence`. Some strict-mode implementations reject those keywords. Use the check 6 command with `"confidence":{"type":"number","minimum":0,"maximum":1}`.
 
 - Accepted: nothing to do.
 - Rejected with a 400: that model cannot be used as is. Either pick another model or remove the two keywords in `schema.go` (the validator already clamps and checks confidence locally).
 
-### [ ] B. Does `GET /tags` work?
+### [x] B. Does `GET /tags` work?
+
+**Result (2026-11-04): yes**, see check 4.
 
 Same as check 4. Listed separately so you record the outcome for the adapter.
 
 ### [ ] C. Do nested Raindrop collections behave in listing?
+
+**Partial result (2026-11-04):** on a library with no nested collections, `GET /collections/childrens` returned the same 9 collections as `GET /collections`, with no parent set. The adapter removes the duplicates, and the dry run was unaffected. Real nesting is still untested.
 
 The adapter reads root collections (`GET /collections`) and merges in child collections (`GET /collections/childrens`). Taxonomy collections are flat and matched by case-insensitive name at the root level. In the throwaway account, create a child collection with a bookmark inside it, then run a dry-run backfill.
 
@@ -125,7 +141,9 @@ Rainwise treats a 2xx with `"result":false` as a failed write, and as not found 
 - A 4xx, or `"result":false`: fine, the write is reported as failed.
 - A 200 with `"result":true` and the bookmark left alone or sent elsewhere: the write looks successful when it isn't. Keep taxonomy collections from being deleted while Rainwise runs, and report it as a bug to fix in the adapter.
 
-### [ ] F. Do list responses include highlights the way a single read does?
+### [x] F. Do list responses include highlights the way a single read does?
+
+**Result (2026-11-04): yes, on a small sample.** All 102 listed bookmarks had the field and a `created` date, and each highlight had `created` too. Only one bookmark had a highlight, and its list and single-read counts matched (1), with the feed also showing one. So an idle sync should need list requests only. Compare again if you have more highlighted bookmarks.
 
 ```sh
 curl -s -H "Authorization: Bearer $RAINDROP_TOKEN" "https://api.raindrop.io/rest/v1/raindrops/0?perpage=50" \
@@ -143,7 +161,9 @@ Use a bookmark with highlights, one without, and compare the first output with t
 
 Run these in order against the throwaway account, with a classifier configured. Start Rainwise with `automation.enabled: false` unless the step says otherwise.
 
-### [ ] D1. Dry-run backfill produces a reviewable plan and changes nothing
+### [x] D1. Dry-run backfill produces a reviewable plan and changes nothing
+
+**Result (2026-11-04): pass** on the real 102-bookmark library with `openai/gpt-oss-20b` and `content_fetch: off`. All 102 were processed with no failures in about 35 seconds. Bookmarks, tags, `lastUpdate` values and collection counts were identical afterwards. Expect a long tail of one-use tags: 109 of 142 proposed tags were used once, so review `/proposed-tags` before approving.
 
 Add 20 or so varied bookmarks to the throwaway account. Then:
 
@@ -156,6 +176,8 @@ curl -s -H "Authorization: Bearer $RAINWISE_API_TOKEN" "$RAINWISE_URL/v1/jobs/JO
 Pass: the job finishes, `/decisions` lists a collection and tags per bookmark, and Raindrop shows no changes (collections and tags as before).
 
 ### [ ] D2. Applied backfill sorts the library; restore returns it exactly
+
+**Partial result (2026-11-04): pass at small scale.** On a real library, a backfill scoped to a 2-bookmark collection moved and tagged only those 2 and created the 9 taxonomy collections, leaving the other 100 unchanged. The restore returned all 102 to their original collection, tags (compared sorted), title and link, deleted the 9 collections and removed the 4 test tags. `lastUpdate` stays changed on the 2 written bookmarks. Manual sort order wasn't compared. A whole-library apply then ran on the 102 bookmarks with no failures: every bookmark landed in its planned collection, user tags were kept, and only approved tags or tags already in the library were added. A whole-library restore is still untested. A short approval list leaves many bookmarks below `min_tags`: approving 45 of 150 proposed tags left 66 of 102 with fewer than 2 tags, and 24 with none. A later `tags_only` reclassify of those 66, using `deepseek/deepseek-v4-flash`, changed tags on 48 and moved nothing, leaving 83 of 102 with 2 to 5 tags. That model had no failures or malformed tags on this run; `openai/gpt-oss-20b` had 2 empty responses and some malformed tags on the same 66.
 
 Apply the reviewed plan with `from_dry_run` and `approved_new_tags` (see the README). Then run a restore dry run and a real restore with the snapshot id from the backfill job.
 

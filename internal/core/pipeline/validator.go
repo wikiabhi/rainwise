@@ -124,6 +124,29 @@ func validateProposal(in ValidateInput, v *Validated) {
 	v.ToReview = true
 }
 
+// collectionWords is the key and name of the collection the bookmark will sit in. A
+// new tag repeating them says nothing the collection doesn't. Other collections' names
+// stay fair, since "backend" on a job post in Career is useful.
+func collectionWords(in ValidateInput) map[string]bool {
+	words := map[string]bool{}
+	add := func(c domain.TaxonomyCollection) {
+		words[taxonomy.ComparisonKey(c.Key)] = true
+		words[taxonomy.ComparisonKey(c.Name)] = true
+	}
+	if in.WantCollection {
+		if c, ok := findCollection(in.Taxonomy, in.Decision.Collection.Key); ok {
+			add(c)
+			return words
+		}
+	}
+	for _, c := range in.Taxonomy.Collections {
+		if id, ok := in.Resolved[c.Key]; ok && id == in.Bookmark.Collection {
+			add(c)
+		}
+	}
+	return words
+}
+
 func validateTags(in ValidateInput, v *Validated) {
 	rules := in.Taxonomy.Rules
 	existing := in.Bookmark.Tags
@@ -136,12 +159,13 @@ func validateTags(in ValidateInput, v *Validated) {
 	for _, e := range existing {
 		seen[taxonomy.ComparisonKey(e)] = true
 	}
+	repeats := collectionWords(in)
 	for _, s := range in.Decision.Tags {
 		if len(v.AddTags) >= room {
 			break
 		}
 		n := taxonomy.Normalize(s.Name, rules.TagAliases)
-		if n == "" || seen[taxonomy.ComparisonKey(n)] {
+		if !taxonomy.ValidTag(n) || seen[taxonomy.ComparisonKey(n)] || repeats[taxonomy.ComparisonKey(n)] {
 			continue
 		}
 		final, isNew, ok := vocab.Resolve(s.Name)

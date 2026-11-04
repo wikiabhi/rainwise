@@ -591,7 +591,7 @@ func (p *Pipeline) classifyAndValidate(ctx context.Context, r *run, want bool) (
 	}
 	if r.opts.TagsOnly && d.Confidence < r.tax.Rules.MinConfidence {
 		v.AddTags, v.NewTags = nil, nil
-		v.Reasons = append(v.Reasons, fmt.Sprintf("confidence %.2f below minimum %.2f: no tags from a highlight", d.Confidence, r.tax.Rules.MinConfidence))
+		v.Reasons = append(v.Reasons, fmt.Sprintf("confidence %.2f below minimum %.2f: no tags added", d.Confidence, r.tax.Rules.MinConfidence))
 	}
 	return v, d, nil
 }
@@ -688,6 +688,7 @@ func (p *Pipeline) classifyWith(ctx context.Context, c ports.Classifier, r *run,
 		Taxonomy: domain.TaxonomySnapshot{
 			ID:          r.tax.ID,
 			Version:     r.tax.Version,
+			Mode:        r.tax.Mode,
 			Collections: r.tax.Collections,
 			Rules:       r.tax.Rules,
 		},

@@ -146,6 +146,9 @@ func (s *Service) validate(ctx context.Context, req CreateRequest) error {
 	if req.Params.ProposeOnly && (req.Type != domain.JobBackfill || !req.DryRun) {
 		return fmt.Errorf("propose_only needs a dry-run backfill: %w", domain.ErrValidation)
 	}
+	if req.Params.TagsOnly && req.Type != domain.JobReclassify {
+		return fmt.Errorf("tags_only needs a reclassify: %w", domain.ErrValidation)
+	}
 	if req.FromDryRun != "" {
 		return s.validatePlan(ctx, req)
 	}
@@ -203,6 +206,8 @@ func (s *Service) validatePlan(ctx context.Context, req CreateRequest) error {
 		return fmt.Errorf("from_dry_run: job %q is for provider %q: %w", plan.ID, plan.Provider, domain.ErrValidation)
 	case plan.TaxonomyID != req.Taxonomy:
 		return fmt.Errorf("from_dry_run: job %q used taxonomy %q: %w", plan.ID, plan.TaxonomyID, domain.ErrValidation)
+	case plan.Params.TagsOnly != req.Params.TagsOnly:
+		return fmt.Errorf("from_dry_run: tags_only differs from that of job %q: %w", plan.ID, domain.ErrValidation)
 	case !sameScope(plan.Scope, req.Scope):
 		return fmt.Errorf("from_dry_run: scope differs from that of job %q: %w", plan.ID, domain.ErrValidation)
 	case plan.Status != domain.JobSucceeded && plan.Status != domain.JobSucceededWithErrors:

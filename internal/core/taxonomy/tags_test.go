@@ -1,6 +1,9 @@
 package taxonomy
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalize(t *testing.T) {
 	aliases := map[string]string{"k8s": "kubernetes"}
@@ -112,5 +115,46 @@ func TestComparisonKeyFoldsSeparators(t *testing.T) {
 		if final, isNew, ok := v.Resolve(in); !ok || isNew || final != want {
 			t.Errorf("Resolve(%q) = %q, %v, %v; want the existing %q", in, final, isNew, ok, want)
 		}
+	}
+}
+
+func TestComparisonKeyIgnoresWordBreaks(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"back-end", "backend"},
+		{"front end", "frontend"},
+		{"data_bases", "databases"},
+		{"System Design", "systemdesign"},
+	} {
+		if a, b := ComparisonKey(pair[0]), ComparisonKey(pair[1]); a != b {
+			t.Errorf("ComparisonKey(%q) = %q, ComparisonKey(%q) = %q, want equal", pair[0], a, pair[1], b)
+		}
+	}
+	if ComparisonKey("go") == ComparisonKey("rust") {
+		t.Error("different tags must stay different")
+	}
+}
+
+func TestNormalizeTurnsUnderscoresIntoHyphens(t *testing.T) {
+	if got := Normalize("Dev_Tools", nil); got != "dev-tools" {
+		t.Errorf("Normalize = %q", got)
+	}
+}
+
+func TestValidTag(t *testing.T) {
+	for _, good := range []string{"go", "c++", "c#", "node.js", "system-design", "k8s", "现代"} {
+		if !ValidTag(good) {
+			t.Errorf("ValidTag(%q) = false", good)
+		}
+	}
+	for _, bad := range []string{"", "??", "]}the-user-asks:", "the…….", "...", "-go", "a b", strings.Repeat("x", 41)} {
+		if ValidTag(bad) {
+			t.Errorf("ValidTag(%q) = true", bad)
+		}
+	}
+}
+
+func TestNormalizeTurnsUnicodeHyphensIntoHyphens(t *testing.T) {
+	if got := Normalize("software\u2011engineering", nil); got != "software-engineering" {
+		t.Errorf("Normalize = %q", got)
 	}
 }

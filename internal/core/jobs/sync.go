@@ -65,9 +65,22 @@ func (d Deps) loadWatermark(ctx context.Context, key string) (time.Time, bool, e
 	return at, true, nil
 }
 
-// syncVocabulary is the persisted vocabulary. Only a backfill refreshes it, because
-// building one can take a pass over the whole library. If there is none, this makes it.
+// syncVocabulary is the provider's tag listing, which costs one request and sees tags
+// added by hand. Without one it's the persisted vocabulary, which only a backfill
+// refreshes, because building one can take a pass over the whole library. If there is
+// none, this makes it.
 func (d Deps) syncVocabulary(ctx context.Context, job *domain.Job, rc RunContext) ([]string, error) {
+	counts, listed, err := d.listedTags(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if listed {
+		terms := taxonomy.TopTerms(counts, d.TagVocabSize)
+		if err := taxonomy.SaveVocab(ctx, d.Store.BookmarkStates(), d.Provider.Name(), terms); err != nil {
+			return nil, fmt.Errorf("save tag vocabulary: %w", err)
+		}
+		return terms, nil
+	}
 	terms, ok, err := taxonomy.LoadVocab(ctx, d.Store.BookmarkStates(), d.Provider.Name())
 	if err != nil || ok {
 		return terms, err

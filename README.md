@@ -82,11 +82,11 @@ Nothing in this sequence changes your library until step 5.
 
 A first sync records bookmarks outside the inbox as known and pinned (source `baseline`) without classifying them, so turning it on does not reshuffle an existing library. Only inbox items (Unsorted) are filed. A bookmark you save straight into a collection is treated as filed on purpose, and gets tags only. A bookmark that fails during a sync is tried again by a later one, and doesn't hold up the others. The exception is the tags-only run for a new highlight: unless `incremental_since` is on, a failed run isn't retried, and those tags are lost until a reclassify covers the bookmark.
 
-A sync with nothing new costs one listing request per 50 bookmarks (about 100 requests, or a minute at the default rate limit, for 5,000), plus a couple for collections. That relies on Raindrop's list responses including highlights, which is [live check F](docs/live-checks.md); if they don't, sync falls back to one more request per bookmark and pages the highlight feed. The tag vocabulary a sync offers the classifier is saved from the last backfill, or from the first sync if there was no backfill, plus the new tags Rainwise has written since. Tags you add by hand join it at the next backfill.
+A sync with nothing new costs one listing request per 50 bookmarks (about 100 requests, or a minute at the default rate limit, for 5,000), plus a couple for collections. That relies on Raindrop's list responses including highlights, which is [live check F](docs/live-checks.md); if they don't, sync falls back to one more request per bookmark and pages the highlight feed. With `tag_listing: true`, each sync reads the tag vocabulary from the provider, for one more request, so tags you add by hand are offered straight away. Without it, the vocabulary is saved from the last backfill, or from the first sync if there was no backfill, plus the new tags Rainwise has written since, and tags you add by hand join it at the next backfill.
 
 Changes filed by a webhook are recorded in the logs only, not in `/decisions`, because they don't belong to a job.
 
-Sync never re-sorts after a taxonomy change; that is what `reclassify` (with a required `scope`) is for. Bookmarks in Needs Review whose content changes are classified again.
+Sync never re-sorts after a taxonomy change; that is what `reclassify` (with a required `scope`) is for. With `"params":{"tags_only":true}`, a reclassify adds tags and never moves a bookmark. Like a backfill, it can run as a dry run, then apply with `from_dry_run` and `approved_new_tags`; the apply must also set `tags_only`. Bookmarks in Needs Review whose content changes are classified again.
 
 ### Manual moves are final
 
