@@ -1,6 +1,6 @@
 # Live checks
 
-**Most of these checks have not been run.** Boxes ticked below were run on 2026-11-04 with read-only requests to a real Raindrop library of 102 bookmarks, or with a test prompt to OpenRouter. Rainwise itself has not yet run against a live service, and no write has been tested. Run the rest before you trust the tool with a real library, and tick the boxes as you go.
+**Most of these checks have not been run.** Boxes ticked below were run on 2026-11-04 with read-only requests to a real Raindrop library of 102 bookmarks, with a test prompt to OpenRouter, or as a Rainwise dry run in Docker. **No write has been tested.** Run the rest before you trust the tool with a real library, and tick the boxes as you go.
 
 Rules for running it:
 
@@ -118,6 +118,8 @@ Same as check 4. Listed separately so you record the outcome for the adapter.
 
 ### [ ] C. Do nested Raindrop collections behave in listing?
 
+**Partial result (2026-11-04):** on a library with no nested collections, `GET /collections/childrens` returned the same 9 collections as `GET /collections`, with no parent set. The adapter removes the duplicates, and the dry run was unaffected. Real nesting is still untested.
+
 The adapter reads root collections (`GET /collections`) and merges in child collections (`GET /collections/childrens`). Taxonomy collections are flat and matched by case-insensitive name at the root level. In the throwaway account, create a child collection with a bookmark inside it, then run a dry-run backfill.
 
 - The bookmark appears in the plan with its real (child) collection, and a root collection with the same name as a taxonomy entry is the one chosen for moves: good.
@@ -157,7 +159,9 @@ Use a bookmark with highlights, one without, and compare the first output with t
 
 Run these in order against the throwaway account, with a classifier configured. Start Rainwise with `automation.enabled: false` unless the step says otherwise.
 
-### [ ] D1. Dry-run backfill produces a reviewable plan and changes nothing
+### [x] D1. Dry-run backfill produces a reviewable plan and changes nothing
+
+**Result (2026-11-04): pass** on the real 102-bookmark library with `openai/gpt-oss-20b` and `content_fetch: off`. All 102 were processed with no failures in about 35 seconds. Bookmarks, tags, `lastUpdate` values and collection counts were identical afterwards. Expect a long tail of one-use tags: 109 of 142 proposed tags were used once, so review `/proposed-tags` before approving.
 
 Add 20 or so varied bookmarks to the throwaway account. Then:
 

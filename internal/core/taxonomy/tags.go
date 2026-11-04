@@ -31,12 +31,12 @@ func clean(tag string) string {
 	return s
 }
 
-// ComparisonKey folds case, word separators and simple plurals, so "System Design",
-// "system-design" and "system_designs" are one tag. It is for comparison only and
+// ComparisonKey folds case, word breaks and simple plurals, so "System Design",
+// "system-design", "systemdesign" and "system_designs" are one tag. It is for comparison only and
 // is never written to a tag.
 func ComparisonKey(tag string) string {
-	s := strings.ToLower(strings.Join(strings.Fields(tag), "-"))
-	s = strings.ReplaceAll(s, "_", "-")
+	s := strings.ToLower(strings.Join(strings.Fields(tag), ""))
+	s = strings.NewReplacer("_", "", "-", "").Replace(s)
 	if len(s) > 3 && strings.HasSuffix(s, "s") &&
 		!strings.HasSuffix(s, "ss") && !strings.HasSuffix(s, "us") && !strings.HasSuffix(s, "is") {
 		s = s[:len(s)-1]

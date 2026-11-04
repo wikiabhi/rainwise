@@ -114,3 +114,19 @@ func TestComparisonKeyFoldsSeparators(t *testing.T) {
 		}
 	}
 }
+
+func TestComparisonKeyIgnoresWordBreaks(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"back-end", "backend"},
+		{"front end", "frontend"},
+		{"data_bases", "databases"},
+		{"System Design", "systemdesign"},
+	} {
+		if a, b := ComparisonKey(pair[0]), ComparisonKey(pair[1]); a != b {
+			t.Errorf("ComparisonKey(%q) = %q, ComparisonKey(%q) = %q, want equal", pair[0], a, pair[1], b)
+		}
+	}
+	if ComparisonKey("go") == ComparisonKey("rust") {
+		t.Error("different tags must stay different")
+	}
+}

@@ -31,18 +31,25 @@ func classifySystem(r ports.ClassifyRequest) string {
 			}
 			fmt.Fprintf(&b, "- key: %s | name: %s | %s\n", c.Key, c.Name, c.Description)
 		}
+		b.WriteString("Choose by what the bookmark is for, not only its topic: a job posting belongs with jobs even when it names a technology.\n")
 		b.WriteString("If none fits, leave \"collection\" empty and put a short suggested collection name in \"proposed_name\". Otherwise leave \"proposed_name\" empty.\n")
 	}
 	if r.TagsWanted > 0 {
-		fmt.Fprintf(&b, "\nSuggest up to %d tags, most relevant first. Prefer reusing tags from this vocabulary: %s.\n",
-			r.TagsWanted, strings.Join(r.TagVocab, ", "))
+		fmt.Fprintf(&b, "\nSuggest up to %d tags, most relevant first. Tags name the specific subjects of this page: technologies, products, techniques and concepts, such as postgres, rate-limiting or rag. Avoid broad words such as learning, software or engineering.\n", r.TagsWanted)
+		b.WriteString("Never use a collection's name or key as a tag; the collection already says that.\n")
+		if need := min(r.Taxonomy.Rules.MinTags-len(r.Subject.Bookmark.Tags), r.TagsWanted); need > 0 {
+			fmt.Fprintf(&b, "Give at least %d tags, but do not pad: every tag must clearly apply to this page.\n", need)
+		} else {
+			b.WriteString("Every tag must clearly apply to this page; do not pad.\n")
+		}
+		fmt.Fprintf(&b, "Existing tag vocabulary: %s. Use one of these only when it truly describes this page, and never add a synonym of one.\n", strings.Join(r.TagVocab, ", "))
 		if !r.Taxonomy.Rules.AllowNewTags {
 			b.WriteString("Use only tags from the vocabulary.\n")
 		} else {
-			b.WriteString("Only add a new tag when no vocabulary tag fits. Tags are short, lowercase, and use hyphens instead of spaces.\n")
+			b.WriteString("Add a new tag when no vocabulary tag means the same thing. Tags are short, lowercase, and use hyphens instead of spaces.\n")
 		}
 	}
-	b.WriteString("\n\"confidence\" is your own estimate from 0 to 1 that the answer is right. Be honest; low is fine. \"reasoning\" is one short sentence.\n")
+	b.WriteString("\n\"confidence\" is your own estimate from 0 to 1 that the answer is right. Be honest; low is fine. If the bookmark says too little to tell what the page is about, for example only a person's or a site's name, give a confidence below 0.5. \"reasoning\" is one short sentence.\n")
 	if x := strings.TrimSpace(r.Taxonomy.Rules.PromptExtra); x != "" {
 		b.WriteString("\nAdditional guidance from the library owner:\n" + x + "\n")
 	}
