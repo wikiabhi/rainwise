@@ -591,7 +591,7 @@ func (p *Pipeline) classifyAndValidate(ctx context.Context, r *run, want bool) (
 	}
 	if r.opts.TagsOnly && d.Confidence < r.tax.Rules.MinConfidence {
 		v.AddTags, v.NewTags = nil, nil
-		v.Reasons = append(v.Reasons, fmt.Sprintf("confidence %.2f below minimum %.2f: no tags from a highlight", d.Confidence, r.tax.Rules.MinConfidence))
+		v.Reasons = append(v.Reasons, fmt.Sprintf("confidence %.2f below minimum %.2f: no tags added", d.Confidence, r.tax.Rules.MinConfidence))
 	}
 	return v, d, nil
 }

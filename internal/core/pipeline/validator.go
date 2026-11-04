@@ -165,7 +165,7 @@ func validateTags(in ValidateInput, v *Validated) {
 			break
 		}
 		n := taxonomy.Normalize(s.Name, rules.TagAliases)
-		if n == "" || seen[taxonomy.ComparisonKey(n)] || repeats[taxonomy.ComparisonKey(n)] {
+		if !taxonomy.ValidTag(n) || seen[taxonomy.ComparisonKey(n)] || repeats[taxonomy.ComparisonKey(n)] {
 			continue
 		}
 		final, isNew, ok := vocab.Resolve(s.Name)

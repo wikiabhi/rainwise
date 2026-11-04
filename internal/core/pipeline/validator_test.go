@@ -223,3 +223,12 @@ func TestValidateDropsTagsThatRepeatTheCollection(t *testing.T) {
 		}
 	})
 }
+
+func TestValidateDropsMalformedTags(t *testing.T) {
+	in := baseInput()
+	in.Decision.Tags = tags("??", "]}the-user-asks:", "kafka", "the…….", "go")
+	got := Validate(in)
+	if !slices.Equal(got.AddTags, []string{"kafka", "go"}) || !slices.Equal(got.NewTags, []string{"kafka", "go"}) {
+		t.Errorf("AddTags = %v, NewTags = %v", got.AddTags, got.NewTags)
+	}
+}

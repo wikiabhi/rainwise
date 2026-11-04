@@ -73,6 +73,7 @@ func (d Deps) runBatch(ctx context.Context, job *domain.Job, rc RunContext, trig
 		DryRun:          job.DryRun,
 		Force:           job.Params.Force || trigger == pipeline.TriggerReclassify,
 		IncludePinned:   job.Params.IncludePinned,
+		TagsOnly:        job.Params.TagsOnly,
 		Taxonomy:        t,
 		Resolved:        resolved,
 		Vocab:           taxonomy.NewRunVocab(terms, t.Rules.TagAliases, job.DryRun && t.Rules.AllowNewTags),

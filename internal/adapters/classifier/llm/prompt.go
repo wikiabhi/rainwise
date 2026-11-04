@@ -2,6 +2,7 @@ package llm
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/wikiabhi/rainwise/internal/domain"
@@ -42,11 +43,18 @@ func classifySystem(r ports.ClassifyRequest) string {
 		fmt.Fprintf(&b, "\nSuggest up to %d tags, most relevant first. Tags name the specific subjects of this page: technologies, products, techniques and concepts, such as postgres, rate-limiting or rag. Avoid broad words such as learning, software or engineering.\n", r.TagsWanted)
 		b.WriteString("Never use a collection's name or key as a tag; the collection already says that.\n")
 		if need := min(r.Taxonomy.Rules.MinTags-len(r.Subject.Bookmark.Tags), r.TagsWanted); need > 0 {
-			fmt.Fprintf(&b, "Give at least %d tags, but do not pad: every tag must clearly apply to this page.\n", need)
+			unit := "tags"
+			if need == 1 {
+				unit = "tag"
+			}
+			fmt.Fprintf(&b, "Give at least %d %s, but do not pad: every tag must clearly apply to this page.\n", need, unit)
 		} else {
 			b.WriteString("Every tag must clearly apply to this page; do not pad.\n")
 		}
-		fmt.Fprintf(&b, "Existing tag vocabulary: %s. Use one of these only when it truly describes this page, and never add a synonym of one.\n", strings.Join(r.TagVocab, ", "))
+		if have := r.Subject.Bookmark.Tags; len(have) > 0 {
+			fmt.Fprintf(&b, "The bookmark already has these tags: %s. Do not repeat them; suggest only additional ones.\n", untrusted(strings.Join(have, ", ")))
+		}
+		fmt.Fprintf(&b, "Existing tag vocabulary: %s. Use one of these only when it truly describes this page, and never add a synonym of one.\n", strings.Join(vocabularyWithout(r.TagVocab, r.Subject.Bookmark.Tags), ", "))
 		if !r.Taxonomy.Rules.AllowNewTags {
 			b.WriteString("Use only tags from the vocabulary.\n")
 		} else {
@@ -58,6 +66,17 @@ func classifySystem(r ports.ClassifyRequest) string {
 		b.WriteString("\nAdditional guidance from the library owner:\n" + x + "\n")
 	}
 	return b.String()
+}
+
+// vocabularyWithout leaves out the tags a bookmark already has.
+func vocabularyWithout(vocab, have []string) []string {
+	out := make([]string, 0, len(vocab))
+	for _, t := range vocab {
+		if !slices.ContainsFunc(have, func(h string) bool { return strings.EqualFold(h, t) }) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func classifyUser(r ports.ClassifyRequest) string {

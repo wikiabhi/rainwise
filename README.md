@@ -86,7 +86,7 @@ A sync with nothing new costs one listing request per 50 bookmarks (about 100 re
 
 Changes filed by a webhook are recorded in the logs only, not in `/decisions`, because they don't belong to a job.
 
-Sync never re-sorts after a taxonomy change; that is what `reclassify` (with a required `scope`) is for. Bookmarks in Needs Review whose content changes are classified again.
+Sync never re-sorts after a taxonomy change; that is what `reclassify` (with a required `scope`) is for. With `"params":{"tags_only":true}`, a reclassify adds tags and never moves a bookmark. Like a backfill, it can run as a dry run, then apply with `from_dry_run` and `approved_new_tags`; the apply must also set `tags_only`. Bookmarks in Needs Review whose content changes are classified again.
 
 ### Manual moves are final
 

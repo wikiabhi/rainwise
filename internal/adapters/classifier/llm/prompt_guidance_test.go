@@ -72,3 +72,19 @@ func TestDynamicTaxonomyCanProposeCollections(t *testing.T) {
 		t.Error("schema lost proposed_name")
 	}
 }
+
+func TestClassifySystemAsksForTagsBeyondExistingOnes(t *testing.T) {
+	r := guidanceRequest()
+	r.TagVocab = []string{"postgres", "kafka"}
+	r.Subject.Bookmark.Tags = []string{"Postgres"}
+	got := classifySystem(r)
+	if !strings.Contains(got, "already has these tags: Postgres") || !strings.Contains(got, "Do not repeat them") {
+		t.Errorf("prompt doesn't rule out existing tags:\n%s", got)
+	}
+	if strings.Contains(got, "vocabulary: postgres") || !strings.Contains(got, "vocabulary: kafka") {
+		t.Errorf("vocabulary still offers an existing tag:\n%s", got)
+	}
+	if !strings.Contains(got, "at least 1 tag,") {
+		t.Errorf("wrong minimum:\n%s", got)
+	}
+}

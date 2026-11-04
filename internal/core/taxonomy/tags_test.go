@@ -1,6 +1,9 @@
 package taxonomy
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalize(t *testing.T) {
 	aliases := map[string]string{"k8s": "kubernetes"}
@@ -133,6 +136,25 @@ func TestComparisonKeyIgnoresWordBreaks(t *testing.T) {
 
 func TestNormalizeTurnsUnderscoresIntoHyphens(t *testing.T) {
 	if got := Normalize("Dev_Tools", nil); got != "dev-tools" {
+		t.Errorf("Normalize = %q", got)
+	}
+}
+
+func TestValidTag(t *testing.T) {
+	for _, good := range []string{"go", "c++", "c#", "node.js", "system-design", "k8s", "现代"} {
+		if !ValidTag(good) {
+			t.Errorf("ValidTag(%q) = false", good)
+		}
+	}
+	for _, bad := range []string{"", "??", "]}the-user-asks:", "the…….", "...", "-go", "a b", strings.Repeat("x", 41)} {
+		if ValidTag(bad) {
+			t.Errorf("ValidTag(%q) = true", bad)
+		}
+	}
+}
+
+func TestNormalizeTurnsUnicodeHyphensIntoHyphens(t *testing.T) {
+	if got := Normalize("software\u2011engineering", nil); got != "software-engineering" {
 		t.Errorf("Normalize = %q", got)
 	}
 }
