@@ -1,6 +1,6 @@
 # Live checks
 
-**Most of these checks have not been run.** Boxes ticked below were run on 2026-11-04 with read-only requests to a real Raindrop library of 102 bookmarks, with a test prompt to OpenRouter, or as a Rainwise job in Docker. **Writes have been tested on 2 bookmarks only.** Run the rest before you trust the tool with a real library, and tick the boxes as you go.
+**Most of these checks have not been run.** Boxes ticked below were run on 2026-11-04 with read-only requests to a real Raindrop library of 102 bookmarks, with a test prompt to OpenRouter, or as a Rainwise job in Docker. **Restore has been tested on 2 bookmarks only.** Run the rest before you trust the tool with a real library, and tick the boxes as you go.
 
 Rules for running it:
 
@@ -177,7 +177,7 @@ Pass: the job finishes, `/decisions` lists a collection and tags per bookmark, a
 
 ### [ ] D2. Applied backfill sorts the library; restore returns it exactly
 
-**Partial result (2026-11-04): pass at small scale.** On a real library, a backfill scoped to a 2-bookmark collection moved and tagged only those 2 and created the 9 taxonomy collections, leaving the other 100 unchanged. The restore returned all 102 to their original collection, tags (compared sorted), title and link, deleted the 9 collections and removed the 4 test tags. `lastUpdate` stays changed on the 2 written bookmarks. Manual sort order wasn't compared. A whole-library apply and restore is still untested.
+**Partial result (2026-11-04): pass at small scale.** On a real library, a backfill scoped to a 2-bookmark collection moved and tagged only those 2 and created the 9 taxonomy collections, leaving the other 100 unchanged. The restore returned all 102 to their original collection, tags (compared sorted), title and link, deleted the 9 collections and removed the 4 test tags. `lastUpdate` stays changed on the 2 written bookmarks. Manual sort order wasn't compared. A whole-library apply then ran on the 102 bookmarks with no failures: every bookmark landed in its planned collection, user tags were kept, and only approved tags or tags already in the library were added. A whole-library restore is still untested. A short approval list leaves many bookmarks below `min_tags`: approving 45 of 150 proposed tags left 66 of 102 with fewer than 2 tags, and 24 with none.
 
 Apply the reviewed plan with `from_dry_run` and `approved_new_tags` (see the README). Then run a restore dry run and a real restore with the snapshot id from the backfill job.
 
